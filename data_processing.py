@@ -1,84 +1,59 @@
-import glob
-import numpy as np
-import pandas as pd
+import glob, numpy as np, pandas as pd, pyarrow.parquet as pq
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
+from sklearn.preprocessing import MinMaxScaler
 
 class StreamingWindowDataset(Dataset):
     def __init__(
         self,
         pattern: str,
-        seq_len: int = 128,
-        stride: int = 16,
+        sample_rate: float,
+        window_ms: float = 50.0,    # now in ms
+        stride_ms: float = 0.0,    # e.g. 50 for non-overlap, 25 for 50% overlap
         feature_min: float = 0.0,
         feature_max: float = 1.0,
-        sep: str = ';',
-        header: int = 1,
-        encoding: str = 'latin1',
-        chunksize: int = 50_000
     ):
-        # 1) discover files
+        # discover your Parquet files
         self.paths = glob.glob(pattern)
         if not self.paths:
             raise FileNotFoundError(f"No files match: {pattern}")
-        self.seq_len   = seq_len
-        self.stride    = stride
-        self.feature_min, self.feature_max = feature_min, feature_max
-        self.sep, self.header, self.encoding = sep, header, encoding
 
-        # 2) compute per-column global min/max by streaming through each file in chunks
-        mins, maxs = None, None
+        # compute lengths in samples
+        self.seq_len = int(sample_rate * (window_ms / 1000.0))
+        self.stride  = (
+            self.seq_len if stride_ms is None
+            else int(sample_rate * (stride_ms / 1000.0))
+        )
+
+        # fit MinMaxScaler across all data
+        self.scaler = MinMaxScaler(feature_range=(int(feature_min), int(feature_max)))
         for p in self.paths:
-            for chunk in pd.read_csv(p,
-                                     sep=sep,
-                                     header=header,
-                                     encoding=encoding,
-                                     engine='python',
-                                     chunksize=chunksize):
-                arr = chunk.values.astype(np.float32)
-                if mins is None:
-                    mins, maxs = arr.min(axis=0), arr.max(axis=0)
-                else:
-                    mins, maxs = np.minimum(mins, arr.min(axis=0)), \
-                                 np.maximum(maxs, arr.max(axis=0))
-        self.data_min = mins
-        self.data_max = maxs
+            df = pd.read_parquet(p)
+            arr = df.iloc[:, 1:].values.astype(np.float32)
+            self.scaler.partial_fit(arr)
 
-        # 3) figure out how many windows each file will yield
-        self.windows_per_file = []
+        # figure out total windows per file
         self.cum_windows = [0]
         for p in self.paths:
-            # total rows in file = lines − header
-            total_rows = sum(1 for _ in open(p, 'r', encoding=encoding)) - header
-            w = max(0, (total_rows - seq_len) // stride + 1)
-            self.windows_per_file.append(w)
+            num_rows = pq.ParquetFile(p).metadata.num_rows
+            w = max(0, (num_rows - self.seq_len)//self.stride + 1)
             self.cum_windows.append(self.cum_windows[-1] + w)
-        self.cum_windows = np.array(self.cum_windows)
+        self.cum_windows = np.array(self.cum_windows, dtype=int)
 
     def __len__(self):
         return int(self.cum_windows[-1])
 
     def __getitem__(self, idx):
-        # 1) map global idx → which file and which window within it
-        file_i = np.searchsorted(self.cum_windows, idx, side='right') - 1
-        local_idx = idx - self.cum_windows[file_i]
-        start_row = local_idx * self.stride
+        # locate the file & window
+        file_i = int(np.searchsorted(self.cum_windows, idx, side='right') - 1)
+        local  = idx - self.cum_windows[file_i]
+        start  = local * self.stride
+        p      = self.paths[file_i]
 
-        # 2) read exactly seq_len rows from that file
-        df = pd.read_csv(self.paths[file_i],
-                         sep=self.sep,
-                         header=self.header,
-                         encoding=self.encoding,
-                         engine='python',
-                         skiprows=self.header + start_row,
-                         nrows=self.seq_len)
-        arr = df.values.astype(np.float32)
+        # read & slice exactly seq_len rows
+        df = pd.read_parquet(p)
+        window = df.iloc[start : start + self.seq_len, 1:].values.astype(np.float32)
 
-        # 3) min-max scale into [feature_min, feature_max]
-        #    avoid div by zero
-        denom = (self.data_max - self.data_min + 1e-6)
-        scaled = (arr - self.data_min) / denom
-        scaled = scaled * (self.feature_max - self.feature_min) + self.feature_min
-
-        return torch.from_numpy(scaled)  # shape: (seq_len, n_channels)
-
+        # normalize & return
+        scaled = self.scaler.transform(window)
+        return torch.from_numpy(scaled)
