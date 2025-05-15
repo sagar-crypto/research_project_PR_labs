@@ -65,13 +65,14 @@ def main(sample_rate: int, window_ms: int, stride_ms: int, latent_dim: int, batc
         avg_loss = total_loss / len(dataset)
         mlflow.log_metric("train_loss", avg_loss, step=epoch)
         print(f"Epoch {epoch}/{epochs}  loss={avg_loss:.4f}")
+    torch.save(model.state_dict(), f"{PROJECT_ROOT}/best_model.pth")
 
     # 5) Extract & save latent features
     model.eval()
     all_latents = []
     with torch.no_grad():
         for batch in DataLoader(dataset, batch_size=256):
-            mu, logvar, _, _ = model.encoder(batch.cuda())
+            mu, logvar, _ = model.encoder(batch.cuda())
             z = model.reparameterize(mu, logvar)
             all_latents.append(z.cpu().numpy())
     latent_features = np.concatenate(all_latents, axis=0)
@@ -81,7 +82,7 @@ def main(sample_rate: int, window_ms: int, stride_ms: int, latent_dim: int, batc
     # 6) Plot reconstructions for a few examples
     orig_batch, = next(iter(loader)), 
     orig = orig_batch.cuda()
-    recon = model(orig)[0].cpu().numpy()
+    recon = model(orig)[0].detach().cpu().numpy()
     plot_reconstruction(orig_batch.numpy(), recon,
                         indices=[0,1,2], out_path=f"{PROJECT_ROOT}/recon_plot.png")
     mlflow.log_artifact(f"{PROJECT_ROOT}/recon_plot.png")

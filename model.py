@@ -30,7 +30,7 @@ class Encoder(nn.Module):
         self.bn0 = nn.BatchNorm1d(in_channels, eps=0.001, momentum=0.99)
 
         # Layer 1: now from 6 → 64
-        self.conv_block_1 = Conv_block(in_channels, 64, kernel_size=21, padding=10,
+        self.conv_block_1 = Conv_block(in_channels, 64, kernel_size=21, padding=10, #use constants to drop out rates
                                        stride=1, use_dropout=True, dropout_rate=0.2)
         # Layer 2
         self.conv_block_2 = Conv_block(64, 64, kernel_size=15, padding=7,
