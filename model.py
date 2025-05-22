@@ -1,128 +1,148 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from constants import (
+    BN_EPS, BN_MOMENTUM,
+    USE_DROPOUT, DROPOUT_RATE,
+    ENCODER_BLOCKS, ADAPT_POOL_OUTPUT_SIZE,
+    DECODER_BLOCKS, FINAL_KERNEL, FINAL_PADDING,
+)
 
 
 class Conv_block(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, padding, stride=1, is_conv=True, use_dropout=False, dropout_rate=0.3):
-        super(Conv_block, self).__init__()
-        self.pool_op = nn.AvgPool1d(2) if is_conv else nn.Upsample(scale_factor=2, mode='linear')
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, padding=padding, stride=stride)
-        self.bn = nn.BatchNorm1d(out_channels, eps=0.001, momentum=0.1)
-        self.activation = nn.GELU()
+    def __init__(
+        self,
+        in_ch, out_ch,
+        kernel, pad, stride=1,
+        is_conv=True,
+        use_dropout=USE_DROPOUT,
+        dropout_rate=DROPOUT_RATE
+    ):
+        super().__init__()
+        self.pool_op = (
+            nn.AvgPool1d(2) if is_conv
+            else nn.Upsample(scale_factor=2, mode='linear', align_corners=True)
+        )
+        self.conv = nn.Conv1d(in_ch, out_ch,
+                              kernel_size=kernel,
+                              padding=pad,
+                              stride=stride)
+        self.bn = nn.BatchNorm1d(out_ch,
+                                 eps=BN_EPS,
+                                 momentum=BN_MOMENTUM)
+        self.act = nn.GELU()
         self.use_dropout = use_dropout
         if use_dropout:
             self.dropout = nn.Dropout(dropout_rate)
 
-
     def forward(self, x):
         x = self.conv(x)
         x = self.bn(x)
-        x = self.activation(x)
+        x = self.act(x)
         if self.use_dropout:
             x = self.dropout(x)
-        x = self.pool_op(x)
-        return x
+        return self.pool_op(x)
     
 class Encoder(nn.Module):
-    def __init__(self, in_channels=6, latent_size=16):
+    def __init__(self, in_channels, latent_size):
         super().__init__()
-        self.bn0 = nn.BatchNorm1d(in_channels, eps=0.001, momentum=0.99)
+        self.bn0 = nn.BatchNorm1d(in_channels,
+                                  eps=BN_EPS,
+                                  momentum=BN_MOMENTUM)
 
-        # Layer 1: now from 6 → 64
-        self.conv_block_1 = Conv_block(in_channels, 64, kernel_size=21, padding=10, #use constants to drop out rates
-                                       stride=1, use_dropout=True, dropout_rate=0.2)
-        # Layer 2
-        self.conv_block_2 = Conv_block(64, 64, kernel_size=15, padding=7,
-                                       stride=2, use_dropout=True, dropout_rate=0.2)
-        # Layer 3
-        self.conv_block_3 = Conv_block(64, 128, kernel_size=11, padding=5,
-                                       stride=2, use_dropout=True, dropout_rate=0.2)
-        # Layer 4
-        self.conv_block_4 = Conv_block(128, 128, kernel_size=7, padding=3,
-                                       stride=2, use_dropout=True, dropout_rate=0.2)
+        # build conv‐blocks from constants
+        ch_in = in_channels
+        self.blocks = nn.ModuleList()
+        for spec in ENCODER_BLOCKS:
+            blk = Conv_block(
+                in_ch=ch_in,
+                out_ch=spec["out_ch"],
+                kernel=spec["kernel"],
+                pad=spec["pad"],
+                stride=spec["stride"],
+            )
+            self.blocks.append(blk)
+            ch_in = spec["out_ch"]
 
-        # Adapt layer to fixed size 4
-        self.adapt_pool = nn.AdaptiveAvgPool1d(4)
+        # adaptive pool to fixed size
+        self.adapt_pool = nn.AdaptiveAvgPool1d(ADAPT_POOL_OUTPUT_SIZE)
+        flat_dim = ADAPT_POOL_OUTPUT_SIZE * ch_in
 
-        # FC heads
-        self.encode_mean   = nn.Linear(4 * 128, latent_size)
-        self.encode_logvar = nn.Linear(4 * 128, latent_size)
+        self.encode_mean   = nn.Linear(flat_dim, latent_size)
+        self.encode_logvar = nn.Linear(flat_dim, latent_size)
 
     def forward(self, x):
-        # x: (B, L, 6) → (B, 6, L)
-        x = x.permute(0,2,1)
+        x = x.permute(0,2,1)      # (B, in_ch, L)
         x = self.bn0(x)
-
-        x1 = self.conv_block_1(x)
-        x2 = self.conv_block_2(x1)
-        x3 = self.conv_block_3(x2)
-        x4 = self.conv_block_4(x3)
-
-        x_pooled = self.adapt_pool(x4)             # (B,128,4)
-        x_flat   = x_pooled.view(x_pooled.size(0), -1)  # (B,4*128)
-
-        mean    = self.encode_mean(x_flat)
-        logvar  = self.encode_logvar(x_flat)
+        skips = []
+        for blk in self.blocks:
+            x = blk(x)
+            skips.append(x)
+        x4 = skips[-1]
+        x_pooled = self.adapt_pool(x4)
+        flat     = x_pooled.flatten(1)
+        mean     = self.encode_mean(flat)
+        logvar   = self.encode_logvar(flat)
         return mean, logvar, x4
 
 
-class Decoder(nn.Module):
-    def __init__(self, length, in_channels=128, latent_size=16, out_channels= 128):
-        super().__init__()
-        self.length = length
 
-        # adapt only to channels, not a fixed time‐axis
+class Decoder(nn.Module):
+    def __init__(self, length, in_channels, latent_size, out_channels):
+        super().__init__()
+        # store for final conv / length
+        self.length = length
+        # final conv uses a constant kernel & pad
+        global FINAL_OUT_CHANNELS
+        FINAL_OUT_CHANNELS = out_channels
+
         self.adapt_nn = nn.Linear(latent_size, in_channels)
         self.relu     = nn.ReLU()
         self.tanh     = nn.Tanh()
 
-        # Mirror the encoder blocks in reverse
-        self.deconv_block_1 = Conv_block(in_channels * 2,
-                                         in_channels,
-                                         kernel_size=7,
-                                         padding=3,
-                                         is_conv=False)
-        self.deconv_block_2 = Conv_block(in_channels, in_channels // 2,
-                                         kernel_size=11,
-                                         padding=5,
-                                         is_conv=False)
-        self.deconv_block_3 = Conv_block(in_channels // 2, in_channels // 2,
-                                         kernel_size=15,
-                                         padding=7,
-                                         is_conv=False)
-        self.deconv_block_4 = Conv_block(in_channels // 2, in_channels // 4,
-                                         kernel_size=21,
-                                         padding=10,
-                                         is_conv=False)
+        # mirror ENCODER_BLOCKS in reverse with upsampling
+        self.blocks = nn.ModuleList()
+        ch_in = in_channels * 2   # because we concat skip
+        for spec in DECODER_BLOCKS:
+            out_ch = spec["out_ch"]
+            blk = Conv_block(
+                in_ch=ch_in,
+                out_ch=out_ch,
+                kernel=spec["kernel"],
+                pad=spec["pad"],
+                is_conv=False,
+            )
+            self.blocks.append(blk)
+            ch_in = out_ch
 
-        # getting desired size
-        self.decode_conv = nn.Conv1d(in_channels // 4, out_channels,
-                                     kernel_size=21, padding=10)
+        # final conv to out_channels
+        self.decode_conv = nn.Conv1d(
+            ch_in,
+            out_channels,
+            kernel_size=FINAL_KERNEL,
+            padding=FINAL_PADDING,
+        )
 
     def forward(self, z, skip_connection):
-        # z → (B, in_channels * (L//16))
-        x = self.relu(self.adapt_nn(z))
-        x = x.unsqueeze(-1)
-        target_len = skip_connection.size(2)
+        x = self.relu(self.adapt_nn(z)).unsqueeze(-1)
+        # up to skip length
         x = F.interpolate(x,
-                          size=target_len,
+                          size=skip_connection.size(2),
                           mode='linear',
                           align_corners=True)
-
-        # concatenate skip features
         x = torch.cat([x, skip_connection], dim=1)
 
-        # run through deconv blocks
-        x = self.deconv_block_1(x)
-        x = self.deconv_block_2(x)
-        x = self.deconv_block_3(x)
-        x = self.deconv_block_4(x)
+        for blk in self.blocks:
+            x = blk(x)
 
-        # upsample back to original length
-        x = F.interpolate(x, size=self.length, mode="linear", align_corners=True)
+        x = F.interpolate(x,
+                          size=self.length,
+                          mode="linear",
+                          align_corners=True)
+
         x = self.decode_conv(x)
         return self.tanh(x)
+
 
 
 class VAE(nn.Module):
