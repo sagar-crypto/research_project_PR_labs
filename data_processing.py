@@ -78,7 +78,8 @@ class StreamingWindowDataset(Dataset):
         local  = idx - self.cum_windows[file_i]
         start  = local * self.stride
         p      = self.paths[file_i]
-        joblib.dump(self.scaler, f"{PROJECT_ROOT}/scalers/minmax_scaler_{self.level1_filter or 'all'}.pkl")
+        meas = self.level1_filter.replace(" ", "_") if self.level1_filter else "all"
+        joblib.dump(self.scaler, f"{PROJECT_ROOT}/scalers/minmax_scaler_{meas}.pkl")
 
         # read, select columns, slice window
         df = pd.read_parquet(p).loc[:, self.keep_cols.to_list()]

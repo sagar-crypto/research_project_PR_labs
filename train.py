@@ -8,16 +8,8 @@ from data_processing import StreamingWindowDataset
 from model import VAE, initialize_weights
 from ploting_util import plot_reconstruction
 from clustering_util import cluster_latent_features
-from config import PROJECT_ROOT, DATA_PATH
-import re
-import os, glob
-
-
-
-CHECKPOINT_DIR = f"{PROJECT_ROOT}/checkpoints"
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-resume = True
-
+from config import PROJECT_ROOT, DATA_PATH, CHECKPOINT_DIR
+import os, glob, shutil
 
 
 def main(
@@ -29,6 +21,7 @@ def main(
     epochs: int,
     learning_rate: float,
     min_cluster_size: int,
+    beta: int,
     plot_interval: int = 10,
 ):
     # 1) Hyperparameters & MLflow setup
@@ -44,6 +37,7 @@ def main(
     "Sekundärspannung L3 in V",
     ]
 
+    resume = True #variable to check older checkpoints
     for meas in MEASUREMENTS:
         print(f"\n▶▶▶ Training VAE for measurement: {meas}")
 
@@ -56,7 +50,7 @@ def main(
             stride_ms=stride_ms,
             feature_min=0.0,
             feature_max=1.0,
-            level1_filter=re.escape(meas),
+            level1_filter=meas,
         )
         train_loader = DataLoader(
             dataset,
@@ -90,18 +84,23 @@ def main(
         
         #checking for checkpoints
         start_epoch = 1
+
+        meas_name = meas.replace(" ", "_") # e.g. "Sekundärspannung_L3_in_V"
+        CKPT_DIR = os.path.join(CHECKPOINT_DIR, meas_name)
+        os.makedirs(CKPT_DIR, exist_ok=True)
+
         if resume:
-            ckpts = glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth"))
+            ckpts = glob.glob(os.path.join(CKPT_DIR, "epoch_*.pth"))
             if ckpts:
-                latest = max(ckpts, key=lambda fn: int(fn.rstrip(".pth").split("_")[-1]))
+                latest = max(ckpts, key=lambda fn: int(os.path.basename(fn).split("_")[-1].rstrip(".pth")))
                 cp = torch.load(latest, map_location=device)
                 model.load_state_dict(cp["model_state"])
                 optimizer.load_state_dict(cp["opt_state"])
                 start_epoch = cp["epoch"] + 1
-                print(f"Resumed from {latest}, starting at epoch {start_epoch}")
+                print(f"▶▶▶ Resumed {meas} from {latest}, starting at epoch {start_epoch}")
 
         # 4) Training loop
-        for epoch in range(1, epochs + 1):
+        for epoch in range(start_epoch, epochs + 1):
             model.train()
             total_loss = 0.0
 
@@ -117,9 +116,9 @@ def main(
                 elif recon.size(2) > x2.size(2):
                     recon = recon[:, :, : x2.size(2)]
 
-                recon_loss = torch.nn.functional.mse_loss(recon, x2, reduction='mean')
-                kld        = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-                loss       = recon_loss + kld
+                recon_loss = torch.nn.functional.mse_loss(recon, x2, reduction='sum')
+                kld        = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
+                loss       = recon_loss + beta * kld
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -133,13 +132,15 @@ def main(
             
 
             #saving checkpoint
-            ckpt_path = os.path.join(CHECKPOINT_DIR, f"epoch_{epoch}.pth")
+            ckpt_path = os.path.join(CKPT_DIR, f"epoch_{epoch:02d}.pth")
             torch.save({
-                "epoch": epoch,
                 "model_state": model.state_dict(),
-                "opt_state": optimizer.state_dict(),
+                "opt_state":  optimizer.state_dict(),
+                "epoch":      epoch
             }, ckpt_path)
-            print(f"→ Saved checkpoint: {ckpt_path}")
+            # update a “latest.pth” shortcut
+            latest_link = os.path.join(CKPT_DIR, "latest.pth")
+            shutil.copyfile(ckpt_path, latest_link)
 
             if epoch % plot_interval == 0:
                 model.eval()
@@ -165,6 +166,7 @@ def main(
                         recon_np,
                         indices=[0],
                         out_path=out_dir,
+                        epoch= epoch,
                         meas=meas.replace(" ", "_")    # match your scaler filename
                     )
                     mlflow.log_artifact(out_dir)
@@ -194,9 +196,9 @@ def main(
         labels = cluster_latent_features(
             latent_features,
             min_cluster_size=min_cluster_size,
-            out_path=f"{PROJECT_ROOT}/clusters.png",
+            out_path=f"{PROJECT_ROOT}/clustering_img/clusters_{meas}.png",
         )
-        mlflow.log_artifact(f"{PROJECT_ROOT}/clusters.png")
+        mlflow.log_artifact(f"{PROJECT_ROOT}/clustering_img/clusters_{meas}.png")
 
     mlflow.end_run()
 
@@ -214,4 +216,5 @@ if __name__ == "__main__":
     best_epochs = best_params['epochs']
     best_learning_rate = best_params['learning_rate']
     best_min_cluster_size = best_params['min_cluster_size']
-    main(sample_rate=best_sample_rate, window_ms=best_window_ms, stride_ms=best_stride_ms, latent_dim=best_latent_dim, batch_size=best_batch_size, epochs=best_epochs, learning_rate=best_learning_rate, min_cluster_size=best_min_cluster_size)
+    best_beta = best_params['beta']
+    main(sample_rate=best_sample_rate, window_ms=best_window_ms, stride_ms=best_stride_ms, latent_dim=best_latent_dim, batch_size=best_batch_size, epochs=best_epochs, learning_rate=best_learning_rate, min_cluster_size=best_min_cluster_size, beta = best_beta)

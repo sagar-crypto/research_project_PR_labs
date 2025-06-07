@@ -1,4 +1,6 @@
 import torch
+from typing import List, Tuple
+from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 from constants import (
@@ -17,7 +19,7 @@ class Conv_block(nn.Module):
         is_conv=True,
         use_dropout=USE_DROPOUT,
         dropout_rate=DROPOUT_RATE
-    ):
+    ) -> None:
         super().__init__()
         self.pool_op = (
             nn.AvgPool1d(2) if is_conv
@@ -35,7 +37,7 @@ class Conv_block(nn.Module):
         if use_dropout:
             self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x = self.conv(x)
         x = self.bn(x)
         x = self.act(x)
@@ -44,7 +46,7 @@ class Conv_block(nn.Module):
         return self.pool_op(x)
     
 class Encoder(nn.Module):
-    def __init__(self, in_channels, latent_size):
+    def __init__(self, in_channels: int, latent_size: int) -> None:
         super().__init__()
         self.bn0 = nn.BatchNorm1d(in_channels,
                                   eps=BN_EPS,
@@ -71,49 +73,55 @@ class Encoder(nn.Module):
         self.encode_mean   = nn.Linear(flat_dim, latent_size)
         self.encode_logvar = nn.Linear(flat_dim, latent_size)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, List[Tensor]]:
         x = x.permute(0,2,1)      # (B, in_ch, L)
         x = self.bn0(x)
-        skips = []
+        skips : List[Tensor] = []
         for blk in self.blocks:
             x = blk(x)
             skips.append(x)
-        x4 = skips[-1]
-        x_pooled = self.adapt_pool(x4)
+        # x4 = skips[-1]
+        x_pooled = self.adapt_pool(skips[-1])
         flat     = x_pooled.flatten(1)
         mean     = self.encode_mean(flat)
         logvar   = self.encode_logvar(flat)
-        return mean, logvar, x4
+        return mean, logvar, skips
 
 
 
 class Decoder(nn.Module):
-    def __init__(self, length, in_channels, latent_size, out_channels):
+    def __init__(
+        self,
+        length: int,
+        in_channels: int,
+        latent_size: int,
+        out_channels: int
+    ) -> None:
         super().__init__()
         # store for final conv / length
         self.length = length
-        # final conv uses a constant kernel & pad
-        global FINAL_OUT_CHANNELS
-        FINAL_OUT_CHANNELS = out_channels
 
         self.adapt_nn = nn.Linear(latent_size, in_channels)
         self.relu     = nn.ReLU()
         self.tanh     = nn.Tanh()
 
+        enc_chs = [spec["out_ch"] for spec in ENCODER_BLOCKS][::-1]
+
         # mirror ENCODER_BLOCKS in reverse with upsampling
         self.blocks = nn.ModuleList()
-        ch_in = in_channels * 2   # because we concat skip
-        for spec in DECODER_BLOCKS:
-            out_ch = spec["out_ch"]
+        ch_in = in_channels   # because we concat skip
+        for idx, spec in enumerate(DECODER_BLOCKS):
+            skip_ch = enc_chs[idx]
+            in_ch   = ch_in + skip_ch
             blk = Conv_block(
-                in_ch=ch_in,
-                out_ch=out_ch,
+                in_ch=in_ch,
+                out_ch=spec["out_ch"],
                 kernel=spec["kernel"],
                 pad=spec["pad"],
                 is_conv=False,
             )
             self.blocks.append(blk)
-            ch_in = out_ch
+            ch_in = spec["out_ch"]
 
         # final conv to out_channels
         self.decode_conv = nn.Conv1d(
@@ -123,16 +131,24 @@ class Decoder(nn.Module):
             padding=FINAL_PADDING,
         )
 
-    def forward(self, z, skip_connection):
+    def forward(self, z: Tensor, skip_connections: List[Tensor]) -> Tensor:
         x = self.relu(self.adapt_nn(z)).unsqueeze(-1)
         # up to skip length
+        target_len = skip_connections[-1].size(2)
         x = F.interpolate(x,
-                          size=skip_connection.size(2),
+                          size=target_len,
                           mode='linear',
                           align_corners=True)
-        x = torch.cat([x, skip_connection], dim=1)
 
-        for blk in self.blocks:
+        for i, blk in enumerate(self.blocks):
+            enc_feat = skip_connections[-(i+1)]
+            x = F.interpolate(
+                x,
+                size=enc_feat.size(2),
+                mode="linear",
+                align_corners=True
+            )
+            x = torch.cat([x, enc_feat], dim=1)
             x = blk(x)
 
         x = F.interpolate(x,
@@ -146,7 +162,13 @@ class Decoder(nn.Module):
 
 
 class VAE(nn.Module):
-    def __init__(self, in_channels, length, latent_size=16, encoder_out_channels=128):
+    def __init__(
+        self,
+        in_channels: int,
+        length: int,
+        latent_size: int = 16,
+        encoder_out_channels: int = 128
+    ) -> None:
         super().__init__()
         self.encoder = Encoder(in_channels=in_channels,
                                latent_size=latent_size)
@@ -154,20 +176,20 @@ class VAE(nn.Module):
                                in_channels=encoder_out_channels,
                                latent_size=latent_size, out_channels=in_channels)
 
-    def reparameterize(self, mean, logvar):
+    def reparameterize(self, mean: Tensor, logvar: Tensor) -> Tensor:
         logvar = torch.clamp(logvar, min=-10, max=10)
         std    = torch.exp(0.5 * logvar).clamp(1e-5, 10.0)
         eps    = torch.randn_like(std)
         return mean + eps * std
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         # x: (B, L, C) → feed to encoder
-        mean, logvar, skip_connection = self.encoder(x)
+        mean, logvar, skip_connections = self.encoder(x)
         z = self.reparameterize(mean, logvar)
-        recon = self.decoder(z, skip_connection)
+        recon = self.decoder(z, skip_connections)
         return recon, mean, logvar
 
-def initialize_weights(m):
+def initialize_weights(m: nn.Module) -> None:
     if isinstance(m, nn.Conv1d) or isinstance(m, nn.ConvTranspose1d):
         nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:

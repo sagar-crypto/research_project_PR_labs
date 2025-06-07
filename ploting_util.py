@@ -7,6 +7,7 @@ def plot_reconstruction(orig: np.ndarray,
                         recon: np.ndarray,
                         indices: list,
                         out_path: str,
+                        epoch: int,
                         meas: str):
     """
     orig, recon: (batch, seq_len, channels) in _scaled_ [0,1] units
@@ -33,6 +34,6 @@ def plot_reconstruction(orig: np.ndarray,
         plt.tight_layout()
 
         # ensure out_path ends with .png or a filename
-        fname = out_path.rstrip('/') + f"/recon_{meas}_idx{i}.png"
+        fname = out_path.rstrip('/') + f"/recon_{meas}_idx{i}_epoch_{epoch}.png"
         plt.savefig(fname)
         plt.close()

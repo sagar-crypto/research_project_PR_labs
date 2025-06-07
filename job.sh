@@ -9,7 +9,7 @@
 #SBATCH --partition=v100                # Specify the GPU partition
 #SBATCH --time=24:00:00                 # Maximum runtime of 24 hours
 #SBATCH --export=NONE                   # Do not export current environment variables
-#SBATCH --job-name=v100-train-code         # Job name
+#SBATCH --job-name=a100-train-code         # Job name
 #SBATCH --output=v100-train-code.out      # Standard output log file (%j expands to job ID)
 #SBATCH --error=v100-train-code.err       # Standard error log file (%j expands to job ID)
  
