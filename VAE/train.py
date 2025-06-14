@@ -8,7 +8,7 @@ from data_processing import StreamingWindowDataset
 from model import VAE, initialize_weights
 from ploting_util import plot_reconstruction
 from clustering_util import cluster_latent_features
-from config import PROJECT_ROOT, DATA_PATH, CHECKPOINT_DIR
+from config import PROJECT_ROOT, DATA_PATH, CHECKPOINT_DIR, MODELS_DIR
 import os, glob, shutil
 
 
@@ -178,7 +178,7 @@ def main(
                 model.train()
 
         # 5) Save final model
-        torch.save(model.state_dict(), f"{PROJECT_ROOT}/{meas.replace(' ','_')}_vae.pth")
+        torch.save(model.state_dict(), f"{MODELS_DIR}/{meas.replace(' ','_')}_vae.pth")
 
         # 6) Extract & save latent features
         model.eval()
@@ -190,7 +190,7 @@ def main(
                 all_latents.append(z.cpu().numpy())
         latent_features = np.concatenate(all_latents, axis=0)
         np.save(f"{PROJECT_ROOT}/{meas.replace(' ','_')}_latents.npy", latent_features)
-        mlflow.log_artifact(f"{PROJECT_ROOT}/{meas.replace(' ','_')}_latents.npy")
+        mlflow.log_artifact(f"{MODELS_DIR}/{meas.replace(' ','_')}_latents.npy")
 
         # 7) Final clustering plot
         labels = cluster_latent_features(

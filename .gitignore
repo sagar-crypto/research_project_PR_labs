@@ -179,3 +179,4 @@ mlruns/*
 *.out
 *.pth
 *.npy
+models/*
