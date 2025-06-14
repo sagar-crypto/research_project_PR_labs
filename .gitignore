@@ -172,3 +172,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+.vscode/*
+mlruns/*
+*.err
+*.out
+*.pth
+*.npy
+models/*
