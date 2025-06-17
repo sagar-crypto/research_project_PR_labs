@@ -22,4 +22,4 @@ jobs:
           git remote add gitlab https://oauth2:${{ secrets.GITLAB_TOKEN }}@git5.cs.fau.de/dpui/projects/coordinated-power-network-protection-based-on-machine-learning-techniques/pt-autoencoder.git
 
           # Push everything
-          git push --mirror gitlab
+          git push gitlab main:github-sync
