@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import MinMaxScaler
 import joblib
-from config import PROJECT_ROOT
+from config import PROJECT_ROOT, SCALER_TRANSFORMERS_DIR
 
 class TransformerWindowDataset(Dataset):
     """
@@ -78,8 +78,10 @@ class TransformerWindowDataset(Dataset):
 
         # Dump scaler once
         meas = level1_filter.replace(" ", "_") if level1_filter else "all"
-        scaler_path = f"{PROJECT_ROOT}/scalers/minmax_scaler_{meas}.pkl"
+        scaler_path = f"{SCALER_TRANSFORMERS_DIR}/minmax_scaler_{meas}.pkl"
+        print(f"Scaler saved to path {scaler_path}")
         joblib.dump(self.scaler, scaler_path)
+        self.scaler_path = scaler_path
 
         # 5) Build cumulative window index for __getitem__ lookup
         self.cum_counts = np.concatenate(([0], np.cumsum(window_counts))).astype(int)

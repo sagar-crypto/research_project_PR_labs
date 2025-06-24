@@ -1,0 +1,22 @@
+{
+    "sample_rate":     7200.0,
+    "window_ms":       100.0,
+    "pred_ms":         50.0,
+    "stride_ms":       50.0,
+    "feature_min":     0.0,
+    "feature_max":     1.0,
+    "level1_filter":   "",
+    "mode":            "reconstruct",
+  
+    "batch_size":      64,
+    "epochs":          50,
+    "learning_rate":   0.001,
+  
+    "d_model":             256,
+    "nhead":               8,
+    "num_encoder_layers":  4,
+    "num_decoder_layers":  4,
+    "dim_feedforward":     512,
+    "dropout":             0.1
+  }
+  
