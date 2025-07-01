@@ -8,7 +8,7 @@ from data_processing import StreamingWindowDataset
 from model import VAE, initialize_weights
 from ploting_util import plot_reconstruction
 from clustering_util import cluster_latent_features
-from config import PROJECT_ROOT, DATA_PATH, CHECKPOINT_DIR, MODELS_DIR
+from config import PROJECT_ROOT, DATA_PATH, CHECKPOINT_VAE_DIR, MODELS_DIR, VAE_DIR
 import os, glob, shutil
 
 
@@ -86,7 +86,7 @@ def main(
         start_epoch = 1
 
         meas_name = meas.replace(" ", "_") # e.g. "Sekundärspannung_L3_in_V"
-        CKPT_DIR = os.path.join(CHECKPOINT_DIR, meas_name)
+        CKPT_DIR = os.path.join(CHECKPOINT_VAE_DIR, meas_name)
         os.makedirs(CKPT_DIR, exist_ok=True)
 
         if resume:
@@ -172,7 +172,7 @@ def main(
                     mlflow.log_artifact(out_dir)
 
                 #deleting old checkpoints
-                old = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
+                old = sorted(glob.glob(os.path.join(CHECKPOINT_VAE_DIR, "epoch_*.pth")))
                 for fn in old[:-3]:
                     os.remove(fn)
                 model.train()
@@ -204,7 +204,7 @@ def main(
 
 if __name__ == "__main__":
 
-    with open(f'{PROJECT_ROOT}/hyperParameters.json', 'r') as f:
+    with open(f'{VAE_DIR}/hyperParameters.json', 'r') as f:
         best_params = json.load(f)
 
     # Extract best parameters
