@@ -9,7 +9,7 @@
     "mode":            "reconstruct",
   
     "batch_size":      64,
-    "epochs":          50,
+    "epochs":          100,
     "learning_rate":   0.001,
   
     "d_model":             256,

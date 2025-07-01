@@ -52,3 +52,40 @@ def plot_reconstruction(
     plt.savefig(path)
     plt.close()
     return path
+
+def plot_loss_curve(
+    train_losses: list,
+    val_losses: list,
+    start_epoch: int,
+    output_dir: str,
+    filename: str = "loss_curve.png",
+    title: str = "Training & Validation Loss"
+):
+    """
+    Plots training and validation loss curves over epochs and saves to disk.
+
+    Args:
+      train_losses   List of training losses per epoch.
+      val_losses     List of validation losses per epoch.
+      start_epoch    Epoch number corresponding to train_losses[0].
+      output_dir     Directory to save the plot.
+      filename       Name of the output image file.
+      title          Plot title.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    epochs = range(start_epoch, start_epoch + len(train_losses))
+    plt.figure(figsize=(6, 4))
+    plt.plot(epochs, train_losses, label="Train Loss")
+    plt.plot(epochs, val_losses,   label="Val Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+
+    path = os.path.join(output_dir, filename)
+    plt.savefig(path)
+    plt.close()
+    print(f"Saved loss curve to {path}")
