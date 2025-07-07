@@ -1,0 +1,17 @@
+{
+    "model_name": "PredTrAD_v1",
+    "dataset": "testdata",
+    "entity": "sensor1",
+    "retrain": "True",
+    "shuffle": "True",
+    "val": 0,
+    "mlflow_experiment": "Experiment_4",
+    "n_epochs": 10,
+    "hyp_lr": 0.0001,
+    "hyp_criterion": "MSE",
+    "hyp_percentage": 1.0,
+    "hyp_lm_d0": 0.99995,
+    "hyp_lm_d1": 1.06,
+    "hyp_delta": 1.0
+  }
+  

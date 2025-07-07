@@ -180,3 +180,4 @@ mlruns/*
 *.pth
 *.npy
 models/*
+external_libs/PredTrAD/data/*

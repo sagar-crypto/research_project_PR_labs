@@ -1,3 +1,10 @@
+import sys
+from pathlib import Path
+
+# Add project root (one level up from this script) to Python’s import path
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
 import os
 import json
 import glob, shutil
@@ -42,14 +49,12 @@ def train_one_epoch(model, loader, criterion, optimizer, device, d_model, warmup
         loss = criterion(output, tgt)
         loss.backward()
         # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer,
-            lambda step: (d_model ** -0.5) *
-                 min((step+1) ** -0.5,
-                     (step+1) * (warmup_steps ** -1.5))
-        )
+        # scheduler = torch.optim.lr_scheduler.ExponentialLR(
+        #     optimizer,
+        #     gamma=0.95
+        # )
         optimizer.step()
-        scheduler.step()
+        # scheduler.step()
 
         running_loss += loss.item() * src.size(0)
     return running_loss / len(loader.dataset)
