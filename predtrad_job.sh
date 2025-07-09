@@ -44,5 +44,5 @@ PREDTRAD_ROOT=$HOME/research_project_PR_labs/external_libs/PredTrAD
 CONFIG_PATH=$PREDTRAD_ROOT/config/epx4/myconfig.json
 
 
-python $PREDTRAD_ROOT/predtrad_impl.py experiment1_2 \
+python $PREDTRAD_ROOT/predtrad_impl.py experiment4 \
   --config $CONFIG_PATH

@@ -253,15 +253,25 @@ def experiment_common(
         window_size = model.n_window
         trainD = torch.cat([convert_to_windows(d, window_size) for d in dict_trainD.values()], dim=0)
 
-        
+        if mlflow_experiment == "Experiment_4":
+            dict_windowed_valD  = {}
+            dict_val_labels     = {}
+            dict_windowed_testD = {
+                k: convert_to_windows(v, window_size)
+                for k, v in dict_testD.items()
+            }
+            dict_test_labels = {
+                k: np.zeros(len(windows), dtype=int)
+                for k, windows in dict_windowed_testD.items()
+            }
         # Experiment 2
-        if dataset == "TIKI" and mlflow_experiment == "Experiment_2":
+        elif dataset == "TIKI" and mlflow_experiment == "Experiment_2":
             trainD, valD = train_val_split(data=trainD, train_size=0.8, shuffle=shuffle, percentage=hyp_percentage)
             dict_windowed_valD = {"val": valD} if val > 0 else {}
             dict_windowed_testD = {k: convert_to_windows(v, window_size) for k, v in dict_testD.items()}
 
         # Experiment 1 and 3
-        elif dataset in ["SMD", "SMAP", "MSL", "testdata"]:
+        elif dataset in ["SMD", "SMAP", "MSL"]:
             trainD, _ = train_val_split(data=trainD, train_size=1.0, shuffle=shuffle, percentage=hyp_percentage)
 
             dict_windowed_testD = {}
@@ -279,15 +289,6 @@ def experiment_common(
                         dict_test_labels.pop(k)
                     else:
                         dict_windowed_testD[k] = windowed_data
-            elif mlflow_experiment == "Experiment_4":
-                # We assume dict_testD was built by pointing the script at your 3% subset folder.
-                # Just window it and skip any val‐split.
-                dict_windowed_valD  = {}
-                dict_val_labels     = {}
-                dict_windowed_testD = {
-                    k: convert_to_windows(v, window_size)
-                    for k, v in dict_testD.items()
-                }
             # Experiment 1 
             else:
                 dict_windowed_testD = {k: convert_to_windows(v, window_size) for k, v in dict_testD.items()}
@@ -373,6 +374,9 @@ def experiment_common(
             df = pd.DataFrame()
             test_pot_predictions = []
             test_pot_thresholds = []
+
+            print(">>> loss.ndim =", loss.ndim, " loss.shape =", loss.shape)
+            print(">>> test_labels.ndim =", test_labels.ndim, " test_labels.shape =", test_labels.shape)
 
             for j in range(dims):
                 test_col_name = test_columns[j]
@@ -505,6 +509,21 @@ def eval_fn_exp_3(loss, labels, params):
         "final_pot_thresholds": final_pot_thresholds
     }
 
+def eval_fn_exp_4(loss: np.ndarray, labels: np.ndarray, params: dict) -> dict:
+    """
+    Simple POT-based evaluation for Experiment 4 (dry-run).
+    """
+    final_result, final_pot_predictions = pot_eval(
+        params.get('init_score', np.array([])),
+        loss,
+        labels,
+        lm=(params.get('lm_d0', None), params.get('lm_d1', None))
+    )
+    return {
+        "final_result": final_result,
+        "final_pot_predictions": final_pot_predictions
+    }
+
 # Main CLI
 @click.group()
 def cli():
@@ -559,6 +578,35 @@ def experiment3_1(config):
     experiment_common(params.get("model_name"), params.get("dataset"), params.get("entity"), params.get("retrain"), params.get("shuffle"), 
                       params.get("val"), params.get("mlflow_experiment"), params.get("n_epochs"), params.get("hyp_lr"), params.get("hyp_criterion"), 
                       params.get("hyp_percentage"), eval_fn_exp_3, additional_params)
+
+@cli.command('experiment4')
+@click.option('--config', type=click.Path(exists=True), required=True)
+def experiment4(config):
+    """
+    Run custom Experiment 4 (dry-run on 3% subset).
+    """
+    params = json.load(open(config))
+    additional_params = {
+        'init_score': np.array(params.get('init_score', [])),
+        'lm_d0':       params.get('lm_d0'),
+        'lm_d1':       params.get('lm_d1'),
+        'scaler':      params.get('scaler', 'min_max'),
+    }
+    experiment_common(
+        params["model_name"],
+        params["dataset"],
+        params["entity"],
+        params["retrain"],
+        params["shuffle"],
+        params["val"],
+        params["mlflow_experiment"],
+        params["n_epochs"],
+        params["hyp_lr"],
+        params["hyp_criterion"],
+        params["hyp_percentage"],
+        eval_fn_exp_4,
+        additional_params
+    )
 
 if __name__ == '__main__':
     cli()
