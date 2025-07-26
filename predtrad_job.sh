@@ -7,7 +7,7 @@
 # ===============================
 #SBATCH --gres=gpu:v100:1               # Request 1 NVIDIA A100 GPU
 #SBATCH --partition=v100                # Specify the GPU partition
-#SBATCH --time=24:00:00                 # Maximum runtime of 24 hours
+#SBATCH --time=1:00:00                 # Maximum runtime of 24 hours
 #SBATCH --export=NONE                   # Do not export current environment variables
 #SBATCH --job-name=v100-train-code         # Job name
 #SBATCH --output=v100-train-code-transformer-predtrad.out      # Standard output log file (%j expands to job ID)
@@ -44,5 +44,5 @@ PREDTRAD_ROOT=$HOME/research_project_PR_labs/external_libs/PredTrAD
 CONFIG_PATH=$PREDTRAD_ROOT/config/epx4/myconfig.json
 
 
-python $PREDTRAD_ROOT/predtrad_impl.py experiment1_2 \
+python $PREDTRAD_ROOT/predtrad_impl.py experiment4 \
   --config $CONFIG_PATH

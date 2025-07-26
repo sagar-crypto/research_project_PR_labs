@@ -100,46 +100,64 @@ def backprop(epoch, model, data, feats, optimizer, criterion, scheduler, trainin
                 test_preds.append(test_pred.squeeze(0))
             return np.concatenate(test_losses, axis=0), np.concatenate(test_preds, axis=0)
     elif 'PredTrAD_v1' in model.name:
+        # data is now a WindowDataset of raw windows
         shuffle = True if training and _shuffle else False
-
-        # data
-        data_enc = data[:, :model.n_enc, :]  # data from 0 to 39 (40)
-        data_dec = data[:, model.n_enc - 1:model.n_window - 1, :]  # data from 39 to 48 (10)
-        data_labels = data[:, model.n_enc:, :]  # data from 40 to 49 (10)
-
-        dataset = torch.utils.data.TensorDataset(data_enc, data_dec, data_labels)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=model.batch, shuffle=shuffle)
+        dataset = data
+        dataloader = DataLoader(dataset,
+                                batch_size=model.batch,
+                                shuffle=shuffle)
 
         if training:
             model.train()
             train_losses = []
-            for i, (enc, dec, labels) in enumerate(dataloader):
+            for window in dataloader:
                 optimizer.zero_grad()
+                # split each window into encoder input, decoder input, and labels
+                enc    = window[:, :model.n_enc, :]
+                dec    = window[:, model.n_enc-1 : model.n_window-1, :]
+                labels = window[:, model.n_enc : model.n_window, :]
                 outputs = model(enc, dec)
                 loss = torch.mean(criterion(outputs, labels))
                 train_losses.append(loss.item())
                 loss.backward()
                 optimizer.step()
             scheduler.step()
-            tqdm.write(f'Epoch {epoch},\tloss= {np.mean(train_losses)}')
+            tqdm.write(f"Epoch {epoch},\tloss= {np.mean(train_losses)}")
             return np.mean(train_losses), optimizer.param_groups[0]['lr']
+
         else:
             with torch.no_grad():
                 model.eval()
                 test_losses = []
-                test_preds = []
-                for i, (enc, dec, labels) in enumerate(dataloader):
+                test_preds  = []
+                for i, window in enumerate(dataloader):
                     if i == 0:
-                        mlflow.log_text(str(summary(model, input_data=(enc, dec), verbose=0)), "model_summary.txt")
+                        # log model summary once
+                        sample_enc = window[:, :model.n_enc, :]
+                        sample_dec = window[:, model.n_enc-1 : model.n_window-1, :]
+                        mlflow.log_text(str(summary(model,
+                                                    input_data=(sample_enc, sample_dec),
+                                                    verbose=0)),
+                                        "model_summary.txt")
+
+                    enc    = window[:, :model.n_enc, :]
+                    dec    = window[:, model.n_enc-1 : model.n_window-1, :]
+                    labels = window[:, model.n_enc : model.n_window, :]
+
                     outputs = model(enc, dec)
-                    test_loss = criterion(outputs, labels).detach().cpu().numpy()[:, -1, :]
-                    #test_loss = criterion(outputs, labels).detach().cpu().numpy().mean(axis=1) # new
+                    # get last timestep’s loss & prediction like before
+                    test_loss = criterion(outputs, labels)\
+                                    .detach()\
+                                    .cpu()\
+                                    .numpy()[:, -1, :]
                     test_pred = outputs.detach().cpu().numpy()[:, -1, :]
 
                     test_losses.append(test_loss)
                     test_preds.append(test_pred)
 
-                return np.concatenate(test_losses, axis=0), np.concatenate(test_preds, axis=0)
+                return (np.concatenate(test_losses, axis=0),
+                        np.concatenate(test_preds,  axis=0))
+
     elif 'PredTrAD_v2' in model.name:
         shuffle = True if training and _shuffle else False
 
@@ -244,24 +262,44 @@ def experiment_common(
 
     with mlflow.start_run(run_name=f"{dataset}_{entity}_{model_name}"):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        dict_trainD, dict_testD, dict_test_labels, dict_test_timestamps, test_columns = load_dataset(device, dataset=dataset, id=entity, scaler=params["scaler"])
+        dict_trainD, dict_testD, raw_test_labels, dict_test_timestamps, test_columns = load_dataset(device, dataset=dataset, id=entity, scaler=params["scaler"])
 
         dims = len(test_columns)
         model, optimizer, scheduler, epoch = load_model(model_name, dims, device=device, lr_d=hyp_lr)
+        model.batch = params.get("batch_size", model.batch)
         testO = dict_testD.copy()
 
         window_size = model.n_window
-        trainD = torch.cat([convert_to_windows(d, window_size) for d in dict_trainD.values()], dim=0)
+        trainD = WindowDataset(dict_trainD, window_size, params.get('stride_size'))
+        stride_size = params.get("stride_size", window_size)
 
-        
+        #For the fault detection dataset
+        if mlflow_experiment == "Experiment_4":
+            dict_windowed_valD  = {}
+            dict_val_labels     = {}
+            dict_windowed_testD = {
+                k: WindowDataset({k: v}, window_size, stride_size)
+                    for k, v in dict_testD.items()
+            }
+            dict_test_labels = {}
+            for k, full_lbls in raw_test_labels.items():
+                n = len(full_lbls)
+                wins = []
+                # slide with stride_size
+                for start in range(0, n - window_size + 1, stride_size):
+                    window = full_lbls[start : start + window_size]
+                    wins.append(1 if window.any() else 0)
+                dict_test_labels[k] = np.array(wins, dtype=int)
+
+
         # Experiment 2
-        if dataset == "TIKI" and mlflow_experiment == "Experiment_2":
+        elif dataset == "TIKI" and mlflow_experiment == "Experiment_2":
             trainD, valD = train_val_split(data=trainD, train_size=0.8, shuffle=shuffle, percentage=hyp_percentage)
             dict_windowed_valD = {"val": valD} if val > 0 else {}
             dict_windowed_testD = {k: convert_to_windows(v, window_size) for k, v in dict_testD.items()}
 
         # Experiment 1 and 3
-        elif dataset in ["SMD", "SMAP", "MSL", "testdata"]:
+        elif dataset in ["SMD", "SMAP", "MSL"]:
             trainD, _ = train_val_split(data=trainD, train_size=1.0, shuffle=shuffle, percentage=hyp_percentage)
 
             dict_windowed_testD = {}
@@ -275,19 +313,10 @@ def experiment_common(
                     windowed_data = convert_to_windows(v, window_size)
                     if k in val_entities:
                         dict_windowed_valD[k] = windowed_data
-                        dict_val_labels[k] = dict_test_labels[k]
-                        dict_test_labels.pop(k)
+                        dict_val_labels[k] = raw_test_labels[k]
+                        raw_test_labels.pop(k)
                     else:
                         dict_windowed_testD[k] = windowed_data
-            elif mlflow_experiment == "Experiment_4":
-                # We assume dict_testD was built by pointing the script at your 3% subset folder.
-                # Just window it and skip any val‐split.
-                dict_windowed_valD  = {}
-                dict_val_labels     = {}
-                dict_windowed_testD = {
-                    k: convert_to_windows(v, window_size)
-                    for k, v in dict_testD.items()
-                }
             # Experiment 1 
             else:
                 dict_windowed_testD = {k: convert_to_windows(v, window_size) for k, v in dict_testD.items()}
@@ -368,15 +397,22 @@ def experiment_common(
         for i, (test_file, testD) in tqdm(enumerate(dict_windowed_testD.items())):
             test_labels = dict_test_labels[test_file]
             loss, y_pred = backprop(0, model, testD, dims, optimizer, criterion, scheduler, training=False, _shuffle=shuffle)
+            if test_labels.ndim == 1:
+                test_labels = test_labels.reshape(-1, 1)
 
             ### Scores
             df = pd.DataFrame()
             test_pot_predictions = []
             test_pot_thresholds = []
 
+            print(">>> loss.ndim =", loss.ndim, " loss.shape =", loss.shape)
+            print(">>> test_labels.ndim =", test_labels.ndim, " test_labels.shape =", test_labels.shape)
+
             for j in range(dims):
                 test_col_name = test_columns[j]
                 params["init_score"] = lossT[:, j]
+                if loss.ndim == 2 and test_labels.ndim == 2 and test_labels.shape[1] == 1 and loss.shape[1] > 1:
+                    test_labels = np.tile(test_labels, (1, loss.shape[1]))
                 result = eval_fn(loss[:, j], test_labels[:, j], params)
 
                 # save the pot predictions and thresholds
@@ -505,6 +541,21 @@ def eval_fn_exp_3(loss, labels, params):
         "final_pot_thresholds": final_pot_thresholds
     }
 
+def eval_fn_exp_4(loss: np.ndarray, labels: np.ndarray, params: dict) -> dict:
+    """
+    Simple POT-based evaluation for Experiment 4 (dry-run).
+    """
+    final_result, final_pot_predictions = pot_eval(
+        params.get('init_score', np.array([])),
+        loss,
+        labels,
+        lm=(params.get('lm_d0', None), params.get('lm_d1', None))
+    )
+    return {
+        "final_result": final_result,
+        "final_pot_predictions": final_pot_predictions
+    }
+
 # Main CLI
 @click.group()
 def cli():
@@ -559,6 +610,36 @@ def experiment3_1(config):
     experiment_common(params.get("model_name"), params.get("dataset"), params.get("entity"), params.get("retrain"), params.get("shuffle"), 
                       params.get("val"), params.get("mlflow_experiment"), params.get("n_epochs"), params.get("hyp_lr"), params.get("hyp_criterion"), 
                       params.get("hyp_percentage"), eval_fn_exp_3, additional_params)
+
+@cli.command('experiment4')
+@click.option('--config', type=click.Path(exists=True), required=True)
+def experiment4(config):
+    """
+    Run custom Experiment 4 (dry-run on 3% subset).
+    """
+    params = json.load(open(config))
+    additional_params = {
+        'init_score': np.array(params.get('init_score', [])),
+        'lm_d0':       params.get('lm_d0'),
+        'lm_d1':       params.get('lm_d1'),
+        'scaler':      params.get('scaler', 'min_max'),
+        'stride_size': params.get('stride_size')
+    }
+    experiment_common(
+        params["model_name"],
+        params["dataset"],
+        params["entity"],
+        params["retrain"],
+        params["shuffle"],
+        params["val"],
+        params["mlflow_experiment"],
+        params["n_epochs"],
+        params["hyp_lr"],
+        params["hyp_criterion"],
+        params["hyp_percentage"],
+        eval_fn_exp_4,
+        additional_params
+    )
 
 if __name__ == '__main__':
     cli()
