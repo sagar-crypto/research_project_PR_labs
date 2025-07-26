@@ -48,13 +48,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device, d_model, warmup
         output = model(src, tgt)
         loss = criterion(output, tgt)
         loss.backward()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        # scheduler = torch.optim.lr_scheduler.ExponentialLR(
-        #     optimizer,
-        #     gamma=0.95
-        # )
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        # scheduler.step()
 
         running_loss += loss.item() * src.size(0)
     return running_loss / len(loader.dataset)
@@ -123,6 +118,7 @@ def main(
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler   = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
     d_model      = cfg.get("d_model", 256)
     warmup_steps = cfg.get("warmup_steps", 1000)
 
@@ -148,6 +144,7 @@ def main(
         print(f"Epoch {epoch}/{num_epochs}")
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, d_model, warmup_steps)
         val_loss = evaluate(model, val_loader, criterion, device)
+        scheduler.step()
         #storing the train and validation loss
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -196,14 +193,14 @@ def main(
                 output_dir = CLUSTERING_TRANSFORMERS_DIR,
                 prefix     = "recon"
             )
-            validation_loss_curve = plot_loss_curve(
+
+    best_path = os.path.join(CHECKPOINT_TRANSFORMERS_DIR, f"best_model_{best_epoch:02d}.pth")
+    validation_loss_curve = plot_loss_curve(
                 train_losses = train_losses,
                 val_losses = val_losses, 
                 start_epoch = epoch, 
                 output_dir = CLUSTERING_TRANSFORMERS_DIR,
                 filename =f"loss_curve{epoch}.png")
-
-    best_path = os.path.join(CHECKPOINT_TRANSFORMERS_DIR, f"best_model_{best_epoch:02d}.pth")
     torch.save(best_state, best_path)
     print(f"Training complete. Best epoch={best_epoch}, val_loss={best_val_loss:.6f}")
     print(f"Best model saved to {best_path}")

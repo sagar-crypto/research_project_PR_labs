@@ -186,3 +186,28 @@ def load_model(modelname, dims, device, lr_d = 0.0001):
     return model, optimizer, scheduler, epoch
 
 
+class WindowDataset(torch.utils.data.Dataset):
+    """
+    Streams sliding windows from a dict of time-series tensors
+    without concatenating them all in memory.
+    """
+    def __init__(self, series_dict, window_size, stride):
+        self.window_size = window_size
+        self.stride      = stride
+        self.series_dict = series_dict
+
+        # build index: list of (key, start_idx)
+        self.index_map = []
+        for key, tensor in series_dict.items():
+            length = tensor.shape[0]
+            for start in range(0, length - window_size + 1, stride):
+                self.index_map.append((key, start))
+
+    def __len__(self):
+        return len(self.index_map)
+
+    def __getitem__(self, idx):
+        key, start = self.index_map[idx]
+        ts = self.series_dict[key]   # torch.Tensor shape (T, feats)
+        window = ts[start : start + self.window_size]
+        return window

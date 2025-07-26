@@ -150,7 +150,8 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(
         data_all, labels_all,
         test_size=args.test_size,
-        shuffle=args.shuffle,
+        shuffle= True,
+        stratify=labels_all,
         random_state=args.random_state
     )
 
