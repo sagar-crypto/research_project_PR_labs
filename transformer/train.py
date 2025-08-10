@@ -20,6 +20,7 @@ import joblib
 from transformer.data_processing import TransformerWindowDataset
 from transformer.model import TransformerAutoencoder
 from transformer.ploting_util import plot_reconstruction, plot_loss_curve
+import numpy as np
 
 from config import DATA_PATH, CHECKPOINT_TRANSFORMERS_DIR, TRANSFORMERS_DIR, CLUSTERING_TRANSFORMERS_DIR
 import mlflow
@@ -138,8 +139,19 @@ def main(
 
     # Training loop
     best_state = None
-    train_losses = []
-    val_losses   = []
+    train_losses_path = os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "train_losses.npy")
+    val_losses_path   = os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "val_losses.npy")
+
+    if os.path.isfile(train_losses_path) and os.path.isfile(val_losses_path):
+        train_losses = np.load(train_losses_path).tolist()
+        val_losses   = np.load(val_losses_path).tolist()
+        start_epoch  = len(train_losses) + 1
+        print(f"Resuming loss history, starting at epoch {start_epoch}")
+    else:
+        train_losses = []
+        val_losses   = []
+        start_epoch  = 1
+
     for epoch in range(start_epoch, num_epochs + 1):
         print(f"Epoch {epoch}/{num_epochs}")
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, d_model, warmup_steps)
@@ -148,6 +160,9 @@ def main(
         #storing the train and validation loss
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+
+        np.save(train_losses_path, np.array(train_losses))
+        np.save(val_losses_path,   np.array(val_losses))
 
         print(f"  Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}")
 
@@ -195,6 +210,8 @@ def main(
             )
 
     best_path = os.path.join(CHECKPOINT_TRANSFORMERS_DIR, f"best_model_{best_epoch:02d}.pth")
+    train_losses = np.load(train_losses_path).tolist()
+    val_losses   = np.load(val_losses_path).tolist()
     validation_loss_curve = plot_loss_curve(
                 train_losses = train_losses,
                 val_losses = val_losses, 
