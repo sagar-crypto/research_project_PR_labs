@@ -6,7 +6,7 @@
     "feature_min":     0.0,
     "feature_max":     1.0,
     "level1_filter":   "",
-    "mode":            "reconstruct",
+    "mode":            "forecast",
   
     "batch_size":      64,
     "epochs":          50,

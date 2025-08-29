@@ -1,4 +1,5 @@
 import glob
+import os
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -28,14 +29,16 @@ class TransformerWindowDataset(Dataset):
         stride_ms: float = 0.0,
         feature_range=(0.0, 1.0),
         level1_filter: str = "",
-        mode: str = "forecast"  # one of ["forecast", "reconstruct"]
+        mode: str = "forecast",  # one of ["forecast", "reconstruct"]
+        events_map: dict | None = None,
+        label_scope: str = "future"
     ):
-        # 1) Discover files
         self.paths = glob.glob(pattern)
         if not self.paths:
             raise FileNotFoundError(f"No files match: {pattern}")
+        self.events_map = events_map
+        self.label_scope = label_scope
 
-        # 2) Convert window & stride from ms → samples
         self.window_len = int(sample_rate * (window_ms / 1000.0))
         self.pred_len   = int(sample_rate * (pred_ms    / 1000.0))
         if stride_ms is None:
@@ -47,10 +50,11 @@ class TransformerWindowDataset(Dataset):
             raise ValueError("pred_ms must be smaller than window_ms")
 
         self.mode = mode
-        if mode not in {"forecast", "reconstruct"}:
-            raise ValueError("mode must be 'forecast' or 'reconstruct'")
+        if self.mode not in {"forecast", "reconstruct", "classify"}:
+            raise ValueError("mode must be 'forecast', 'reconstruct', or 'classify'")
+        if self.mode == "classify" and self.events_map is None:
+            raise ValueError("events_map is required in 'classify' mode")
 
-        # 3) Pick columns once
         sample_df = pd.read_parquet(self.paths[0])
         cols = sample_df.columns  # MultiIndex
         if level1_filter:
@@ -64,8 +68,13 @@ class TransformerWindowDataset(Dataset):
         self.keep_cols = cols[keep]
         if len(self.keep_cols) == 0:
             raise ValueError(f"No columns match measurement '{level1_filter}'")
+        
+        lvl1 = sample_df.columns.get_level_values(1)
+        time_mask = lvl1.str.contains("Zeitpunkt", na=False)
+        if not time_mask.any():
+            raise ValueError("No timestamp column found (level-1 contains 'Zeitpunkt')")
+        self.time_col = sample_df.columns[time_mask][0]  # e.g. ('ResultsRepl','Zeitpunkt in s')
 
-        # 4) Fit scaler over all data in one pass
         self.scaler = MinMaxScaler(feature_range=feature_range)
         window_counts = []
         for p in self.paths:
@@ -83,36 +92,63 @@ class TransformerWindowDataset(Dataset):
         joblib.dump(self.scaler, scaler_path)
         self.scaler_path = scaler_path
 
-        # 5) Build cumulative window index for __getitem__ lookup
         self.cum_counts = np.concatenate(([0], np.cumsum(window_counts))).astype(int)
 
     def __len__(self):
         return int(self.cum_counts[-1])
 
     def __getitem__(self, idx):
-        # 1) Find which file & local window index
         file_i = int(np.searchsorted(self.cum_counts, idx, side="right") - 1)
         local  = idx - self.cum_counts[file_i]
         start  = local * self.stride
         path   = self.paths[file_i]
 
-        # 2) Load, select, slice
-        df = pd.read_parquet(path).loc[:, self.keep_cols.to_list()]
-        window = df.iloc[start : start + self.window_len].values.astype(np.float32)
+        df = pd.read_parquet(path)
 
-        # 3) Normalize
-        window = self.scaler.transform(window)
+        # --- IMPORTANT: slice rows by position with .iloc to get EXACT window_len rows ---
+        row_slice = slice(start, start + self.window_len)
+        df_rows = df.iloc[row_slice]
 
-        # 4) Split into src/tgt or full/full
+        # features (use loc for columns on the already row-sliced frame)
+        feat_df = df_rows.loc[:, self.keep_cols.to_list()]
+        feat = feat_df.to_numpy(dtype=np.float32)
+
+        # timestamps (seconds); self.time_col can be a MultiIndex tuple or a flat name
+        times = df_rows.loc[:, self.time_col].to_numpy(dtype=np.float32)
+
+        feat = self.scaler.transform(feat)
+
         if self.mode == "forecast":
-            src = window[: self.window_len - self.pred_len]
-            tgt = window[self.window_len - self.pred_len :]
-            return (
-                torch.from_numpy(src),  # shape: ((w-p), d)
-                torch.from_numpy(tgt)   # shape: (p, d)
-            )
-        else:  # reconstruct
-            return (
-                torch.from_numpy(window),  # shape: (w, d)
-                torch.from_numpy(window)   # same for target
-            )
+            src = feat[: self.window_len - self.pred_len]
+            tgt = feat[self.window_len - self.pred_len :]
+            # return owning, contiguous tensors
+            return (torch.tensor(src, dtype=torch.float32),
+                    torch.tensor(tgt, dtype=torch.float32))
+
+        elif self.mode == "reconstruct":
+            window = feat
+            return (torch.tensor(window, dtype=torch.float32),
+                    torch.tensor(window, dtype=torch.float32))
+
+        else:  # "classify"
+            # classifier uses encoder context as input
+            src = feat[: self.window_len - self.pred_len]
+
+            # choose which part of the window to label
+            if self.label_scope == "future":
+                times_for_label = times[-self.pred_len:]   # prediction horizon
+            else:
+                times_for_label = times                    # whole window
+
+            base = os.path.splitext(os.path.basename(path))[0]
+            t_ev = self.events_map.get(base, None)
+
+            if t_ev is None:
+                y = 0
+            else:
+                t0, t1 = t_ev
+                in_evt = (times_for_label >= t0) & (times_for_label <= t1)
+                y = int(in_evt.any())
+
+            return torch.tensor(src, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+

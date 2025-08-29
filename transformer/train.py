@@ -81,7 +81,7 @@ def main(
         ):
     
     # 1) Hyperparameters & MLflow setup
-    mlflow.set_experiment("Transformer_Fault_Detection")
+    mlflow.set_experiment("Transformer_Fault_Detection_new")
     mlflow.start_run()
     resume = True #variable to check older checkpoints
     # Dataset & DataLoader

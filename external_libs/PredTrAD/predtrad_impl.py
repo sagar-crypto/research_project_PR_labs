@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+project_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(project_root))
+
 import os
 import json
 import pandas as pd
@@ -14,6 +19,27 @@ import mlflow.pytorch
 from src.models import *
 from src.utils import *
 from src.pot import *
+from config import CHECKPOINT_PREDTRAD_DIR
+
+
+def print_cuda_mem(tag=""):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        a = torch.cuda.memory_allocated()/1e9
+        r = torch.cuda.memory_reserved()/1e9
+        m = torch.cuda.max_memory_allocated()/1e9
+        print(f"[MEM {tag}] alloc={a:.2f}G reserved={r:.2f}G max_alloc={m:.2f}G")
+
+
+
+def labels_to_window_labels(lbls_1d: np.ndarray, win: int, stride: int) -> np.ndarray:
+    """Any fault inside a window => label 1; else 0."""
+    out = []
+    n = len(lbls_1d)
+    for start in range(0, n - win + 1, stride):
+        w = lbls_1d[start : start + win]
+        out.append(1 if np.any(w) else 0)
+    return np.array(out, dtype=int)
 
 def backprop(epoch, model, data, feats, optimizer, criterion, scheduler, training=True, _shuffle=False):
     if 'TranAD' in model.name:
@@ -100,6 +126,8 @@ def backprop(epoch, model, data, feats, optimizer, criterion, scheduler, trainin
                 test_preds.append(test_pred.squeeze(0))
             return np.concatenate(test_losses, axis=0), np.concatenate(test_preds, axis=0)
     elif 'PredTrAD_v1' in model.name:
+        model_device = next(model.parameters()).device
+        model_dtype  = next(model.parameters()).dtype
         # data is now a WindowDataset of raw windows
         shuffle = True if training and _shuffle else False
         dataset = data
@@ -113,6 +141,7 @@ def backprop(epoch, model, data, feats, optimizer, criterion, scheduler, trainin
             for window in dataloader:
                 optimizer.zero_grad()
                 # split each window into encoder input, decoder input, and labels
+                window = window.to(device=model_device, dtype=torch.float32, non_blocking=True)
                 enc    = window[:, :model.n_enc, :]
                 dec    = window[:, model.n_enc-1 : model.n_window-1, :]
                 labels = window[:, model.n_enc : model.n_window, :]
@@ -133,13 +162,15 @@ def backprop(epoch, model, data, feats, optimizer, criterion, scheduler, trainin
                 for i, window in enumerate(dataloader):
                     if i == 0:
                         # log model summary once
-                        sample_enc = window[:, :model.n_enc, :]
-                        sample_dec = window[:, model.n_enc-1 : model.n_window-1, :]
+                        samp = window[:1].to(device=model_device, dtype=torch.float32, non_blocking=True)
+                        sample_enc = samp[:, :model.n_enc, :]
+                        sample_dec = samp[:, model.n_enc-1 : model.n_window-1, :]
                         mlflow.log_text(str(summary(model,
                                                     input_data=(sample_enc, sample_dec),
                                                     verbose=0)),
                                         "model_summary.txt")
 
+                    window = window.to(device=model_device, dtype=torch.float32, non_blocking=True)
                     enc    = window[:, :model.n_enc, :]
                     dec    = window[:, model.n_enc-1 : model.n_window-1, :]
                     labels = window[:, model.n_enc : model.n_window, :]
@@ -243,8 +274,8 @@ def experiment_common(
     BEST_VAL_SCORE = float('inf') if dataset == "TIKI" else 0
 
     # Path to save the model
-    os.makedirs("models", exist_ok=True)
-    SAVE_PATH = os.path.join("models", f"{model_name}_{dataset}_{entity}.pt")
+    os.makedirs(CHECKPOINT_PREDTRAD_DIR, exist_ok=True)
+    SAVE_PATH = os.path.join(CHECKPOINT_PREDTRAD_DIR, f"{model_name}_{dataset}_{entity}.pt")
     
 
     # Criterion selection
@@ -266,6 +297,7 @@ def experiment_common(
 
         dims = len(test_columns)
         model, optimizer, scheduler, epoch = load_model(model_name, dims, device=device, lr_d=hyp_lr)
+        model = model.to(device=device, dtype=torch.float32)
         model.batch = params.get("batch_size", model.batch)
         testO = dict_testD.copy()
 
@@ -274,22 +306,36 @@ def experiment_common(
         stride_size = params.get("stride_size", window_size)
 
         #For the fault detection dataset
+        dict_windowed_valD  = {}
+        dict_val_labels     = {}
+        dict_windowed_testD = {}
+        dict_test_labels    = {}
         if mlflow_experiment == "Experiment_4":
-            dict_windowed_valD  = {}
-            dict_val_labels     = {}
-            dict_windowed_testD = {
-                k: WindowDataset({k: v}, window_size, stride_size)
-                    for k, v in dict_testD.items()
-            }
-            dict_test_labels = {}
-            for k, full_lbls in raw_test_labels.items():
-                n = len(full_lbls)
-                wins = []
-                # slide with stride_size
-                for start in range(0, n - window_size + 1, stride_size):
-                    window = full_lbls[start : start + window_size]
-                    wins.append(1 if window.any() else 0)
-                dict_test_labels[k] = np.array(wins, dtype=int)
+            # --- Build VAL and TEST from dict_testD (both have labels) --
+
+            # how many test files to hold out for validation
+            all_items = sorted(dict_testD.items(), key=lambda kv: kv[0])     # deterministic order
+            n_files   = len(all_items)
+            vsf       = int(params.get("val_split_files", 1))
+            vsfrac    = float(params.get("val_split_frac", 0.0))
+            if 0.0 < vsfrac < 1.0:
+                vsf = max(1, int(round(n_files * vsfrac)))
+            vsf = max(0, min(vsf, n_files))  # clamp
+
+            val_items  = all_items[:vsf]
+            test_items = all_items[vsf:] if vsf > 0 else all_items
+
+            # Build VAL
+            for k, v in val_items:
+                dict_windowed_valD[k] = WindowDataset({k: v}, window_size, stride_size)
+                full_lbls = raw_test_labels[k]
+                dict_val_labels[k] = labels_to_window_labels(full_lbls, window_size, stride_size)
+
+            # Build TEST
+            for k, v in test_items:
+                dict_windowed_testD[k] = WindowDataset({k: v}, window_size, stride_size)
+                full_lbls = raw_test_labels[k]
+                dict_test_labels[k] = labels_to_window_labels(full_lbls, window_size, stride_size)
 
 
         # Experiment 2
@@ -334,56 +380,74 @@ def experiment_common(
         for param_name, param_value in params.items():
             mlflow.log_param(param_name, param_value)
 
-        # Training phase
+        val_every = int(params.get("val_every", 1))           # run validation every N epochs
+        have_val  = len(dict_windowed_valD) > 0               # we actually built a val set
+        BEST_VAL_SCORE = float('inf') if dataset == "TIKI" else -float('inf')
+        COUNTER, PATIENCE = 0, 3
+
         if retrain:
             for e in tqdm(range(n_epochs)):
-                lossT, lr = backprop(e, model, trainD, dims, optimizer, criterion, scheduler, training=True,
-                                     _shuffle=shuffle)
-                mlflow.log_metric("train_loss", lossT, step=e)
-                mlflow.log_metric("train_lr", lr, step=e)
+                lossT, lr = backprop(e, model, trainD, dims, optimizer, criterion, scheduler,
+                                    training=True, _shuffle=shuffle)
+                mlflow.log_metric("train_loss", float(lossT), step=e)
+                mlflow.log_metric("train_lr",   float(lr),    step=e)
 
-                # Validation phase
-                if e > 0 and val > 0 and e % val == 0:
-                    model.eval()
-                    val_score = 0
-
-                    # Experiment 3 uses lossT as init_score
-                    lossT,_ = backprop(e, model, trainD, dims, optimizer, criterion, scheduler, training=False, _shuffle=shuffle)
-                    params["init_score"] = np.mean(lossT, axis=1)
-
-                    for i, (val_file, valD) in enumerate(dict_windowed_valD.items()):
-                        lossV,_ = backprop(e, model, valD, dims, optimizer, criterion, scheduler, training=False, _shuffle=shuffle)
-                        if dataset != "TIKI":
-                            mean_lossV = np.mean(lossV, axis=1)
-                            labelsFinal = (np.sum(dict_val_labels[val_file], axis=1) >= 1) + 0
-
-                            result = eval_fn(mean_lossV, labelsFinal, params)
-                            result_f1 = result['final_result']['f1']
-                            mlflow.log_metric(f"val_f1_{val_file}", result_f1, step=e)
-                            val_score += result_f1
-                        else:
-                            val_score += np.mean(lossV)
-                            # log to mlflow the loss for each validation file
-                            mlflow.log_metric("val_loss", val_score, step=e)
-
-
-                    val_score /= len(dict_windowed_valD)
-
-                    # Determine the condition for early stopping
-                    keep_going = val_score < BEST_VAL_SCORE if dataset == "TIKI" else val_score > BEST_VAL_SCORE
-
-                    # EARLY STOPPING
-                    if keep_going:
-                        BEST_VAL_SCORE = val_score
+                # If no validation set exists (e.g., you set val_split_files=0), still save at epoch 0 & last
+                if not have_val:
+                    if e == 0 or e == n_epochs - 1:
+                        os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
                         torch.save(model.state_dict(), SAVE_PATH)
+                        try: mlflow.log_artifact(SAVE_PATH)
+                        except Exception: pass
+                    continue
+
+                # Validate every `val_every` epochs
+                do_val = (val_every > 0) and ((e + 1) % val_every == 0)
+                if not do_val:
+                    continue
+
+                model.eval()
+                with torch.no_grad():
+                    # Stable POT baseline: no shuffle here
+                    lossTrain,_ = backprop(e, model, trainD, dims, optimizer, criterion, scheduler,
+                                        training=False, _shuffle=False)
+                    params["init_score"] = np.mean(lossTrain, axis=1)
+
+                    val_score = 0.0
+                    for val_file, valD in dict_windowed_valD.items():
+                        lossV,_ = backprop(e, model, valD, dims, optimizer, criterion, scheduler,
+                                        training=False, _shuffle=False)
+                        if dataset != "TIKI":
+                            mean_lossV  = np.mean(lossV, axis=1)
+                            labelsFinal = (np.sum(dict_val_labels[val_file], axis=1) >= 1).astype(int)
+                            result      = eval_fn(mean_lossV, labelsFinal, params)
+                            f1          = float(result['final_result']['f1'])
+                            mlflow.log_metric(f"val_f1_{val_file}", f1, step=e)
+                            val_score  += f1
+                        else:
+                            v = float(np.mean(lossV))
+                            mlflow.log_metric(f"val_loss_{val_file}", v, step=e)
+                            val_score  += v
+
+                    val_score /= max(1, len(dict_windowed_valD))
+                    mlflow.log_metric("val_score", val_score, step=e)
+
+                    improved = (val_score < BEST_VAL_SCORE) if dataset == "TIKI" else (val_score > BEST_VAL_SCORE)
+                    if improved or (e == 0 and not os.path.exists(SAVE_PATH)):
+                        BEST_VAL_SCORE = val_score
+                        os.makedirs(os.path.dirname(SAVE_PATH), exist_ok=True)
+                        torch.save(model.state_dict(), SAVE_PATH)
+                        try: mlflow.log_artifact(SAVE_PATH)
+                        except Exception: pass
                         COUNTER = 0
                     else:
                         COUNTER += 1
                         print(f"Early stopping: {COUNTER}/{PATIENCE}")
-                        if COUNTER == PATIENCE:
-                            print(f'Early stopping at epoch {e + 1}')
+                        if COUNTER >= PATIENCE:
+                            print(f"Early stopping at epoch {e + 1}")
                             break
-                    model.train()
+                model.train()
+
 
         # Load the best model from the training phase for testing
         if n_epochs > 1 and val > 0:
@@ -404,9 +468,6 @@ def experiment_common(
             df = pd.DataFrame()
             test_pot_predictions = []
             test_pot_thresholds = []
-
-            print(">>> loss.ndim =", loss.ndim, " loss.shape =", loss.shape)
-            print(">>> test_labels.ndim =", test_labels.ndim, " test_labels.shape =", test_labels.shape)
 
             for j in range(dims):
                 test_col_name = test_columns[j]

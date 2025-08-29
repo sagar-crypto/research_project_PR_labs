@@ -5,13 +5,13 @@
 # ===============================
 # SLURM Directives
 # ===============================
-#SBATCH --gres=gpu:v100:1               # Request 1 NVIDIA A100 GPU
-#SBATCH --partition=v100                # Specify the GPU partition
-#SBATCH --time=1:00:00                 # Maximum runtime of 24 hours
+#SBATCH --gres=gpu:a100:1               # Request 1 NVIDIA A100 GPU
+#SBATCH --partition=a100                # Specify the GPU partition
+#SBATCH --time=24:00:00                 # Maximum runtime of 24 hours
 #SBATCH --export=NONE                   # Do not export current environment variables
-#SBATCH --job-name=v100-train-code         # Job name
-#SBATCH --output=v100-train-code-transformer-predtrad.out      # Standard output log file (%j expands to job ID)
-#SBATCH --error=v100-train-code-transformer-predtrad.err       # Standard error log file (%j expands to job ID)
+#SBATCH --job-name=a100-train-code         # Job name
+#SBATCH --output=a100-train-code-transformer-predtrad.out      # Standard output log file (%j expands to job ID)
+#SBATCH --error=a100-train-code-transformer-predtrad.err       # Standard error log file (%j expands to job ID)
  
 # ===============================
 # Environment Configuration
