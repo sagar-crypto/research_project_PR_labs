@@ -1,16 +1,19 @@
 import glob, os
 from pathlib import Path
+from typing import Dict, List, Tuple, Optional 
 
 import numpy as np
 import pandas as pd
 import joblib
-import pyarrow.parquet as pq  # for fast row counts
+import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import MinMaxScaler
 import hashlib
 
 from config import SCALER_TRANSFORMERS_DIR
+
+Interval = Tuple[float, float]
 
 
 class ParquetTimeSeriesDataset(Dataset):
@@ -32,6 +35,9 @@ class ParquetTimeSeriesDataset(Dataset):
         pred_ms: float,
         stride_ms: float,
         feature_range=(0.0, 1.0),
+        events_map: Optional[Dict[str, List[Interval]]] = None,
+        label_scope: str = "window",
+        label_unit: str = "sec"
     ):
         # 1) Discover files & window sizes
         self.files = sorted(glob.glob(pattern))
@@ -81,7 +87,7 @@ class ParquetTimeSeriesDataset(Dataset):
         if self.n_features == 0:
             raise ValueError("No common 'Cub'+'Line' feature columns across files.")
 
-        # CHANGED: load-or-fit scaler ONCE; cache keyed by feat_cols + feature_range
+        # load-or-fit scaler ONCE; cache keyed by feat_cols + feature_range
         sig = hashlib.sha1((','.join(self.feat_cols) + repr(feature_range)).encode()).hexdigest()[:8]
         os.makedirs(SCALER_TRANSFORMERS_DIR, exist_ok=True)
         self.scaler_path = str(
@@ -111,7 +117,10 @@ class ParquetTimeSeriesDataset(Dataset):
                 if missing:
                     raise KeyError(f"{fn} missing expected features: {missing[:5]}...")
                 arr = df.loc[:, self.feat_cols].to_numpy(dtype=np.float32)
-                self.scaler.partial_fit(arr)
+                mask = np.isfinite(arr).all(axis=1)
+                arr_fit = arr[mask]
+                if arr_fit.size:        # only fit if something valid remains
+                    self.scaler.partial_fit(arr_fit)
 
             payload = {
                 "scaler": self.scaler,
@@ -125,7 +134,39 @@ class ParquetTimeSeriesDataset(Dataset):
         # store time detection pattern
         self._time_pat = time_pat
 
-        # 4) Precompute window counts for __len__ using parquet metadata (no data read)
+        self.events_map  = events_map or {}
+        self.label_scope = label_scope
+        self.label_unit  = label_unit.lower().strip()
+        if self.label_unit not in ("sec", "ms"):
+            raise ValueError("label_unit must be 'sec' or 'ms'.")
+
+        # Build per-file 0/1 masks in sample indices for quick labeling
+        self._fault_masks = {}  # fn -> np.uint8 [n_rows]
+        if self.events_map:
+            for fn in self.files:
+                n_rows = pq.ParquetFile(fn).metadata.num_rows
+                mask = np.zeros(n_rows, dtype=np.uint8)
+                key = Path(fn).stem  # expects keys like "replica_123"
+
+                for (s, e) in self.events_map.get(key, []):
+                    # convert to sample indices from sec/ms
+                    if self.label_unit == "ms":
+                        si = int(round((float(s) / 1000.0) * self.sample_rate))
+                        ei = int(round((float(e) / 1000.0) * self.sample_rate))
+                    else:  # "sec"
+                        si = int(round(float(s) * self.sample_rate))
+                        ei = int(round(float(e) * self.sample_rate))
+
+                    if ei < si:
+                        si, ei = ei, si
+                    si = max(0, min(si, max(0, n_rows - 1)))
+                    ei = max(0, min(ei, n_rows))
+                    if ei > si:
+                        mask[si:ei] = 1
+
+                self._fault_masks[fn] = mask
+
+        # Precompute window counts for __len__ using parquet metadata (no data read)
         counts = []
         for fn in self.files:
             n = pq.ParquetFile(fn).metadata.num_rows
@@ -142,15 +183,33 @@ class ParquetTimeSeriesDataset(Dataset):
         start = local * self.stride
 
         feat_mat, time_arr = self._get_file_arrays(file_i)
+        fn = self.files[file_i]
 
         ctx = feat_mat[start : start + self.seq_len]
         tgt = feat_mat[start + self.seq_len : start + self.seq_len + self.pred_len]
         times = time_arr[start : start + self.seq_len]
 
+        y = 0
+        if self._fault_masks:
+            mask = self._fault_masks.get(fn, None)
+            if mask is not None:
+                if self.label_scope == "future":
+                    a = start + self.seq_len
+                    b = a + self.pred_len
+                    y = int(mask[a:b].any())
+                elif self.label_scope == "context":
+                    y = int(mask[start : start + self.seq_len].any())
+                elif self.label_scope == "center":
+                    center = min(start + self.seq_len // 2, len(mask) - 1)
+                    y = int(mask[center])
+                else:  # "window" (default): context + future
+                    y = int(mask[start : start + self.seq_len + self.pred_len].any())
+
         return (
             torch.from_numpy(ctx).float(),                    # (seq_len, n_features)
             torch.from_numpy(tgt).float(),                    # (pred_len, n_features)
             torch.from_numpy(times).float().unsqueeze(-1),    # (seq_len, 1)
+            torch.tensor([y], dtype=torch.float32)
         )
 
     # ---------- internals ----------
@@ -172,8 +231,10 @@ class ParquetTimeSeriesDataset(Dataset):
         if tmask.any():
             time_col = cols_idx[tmask][0]
             time_arr = df[time_col].to_numpy(dtype=np.float32)
+            # if any non-finite OR the last value is bad, use synthetic ramp
+            if (not np.isfinite(time_arr).all()) or (not np.isfinite(time_arr[-1])):
+                time_arr = (np.arange(len(df), dtype=np.float32) / self.sample_rate)
         else:
-            # synthetic time in seconds, evenly spaced by sample_rate
             time_arr = (np.arange(len(df), dtype=np.float32) / self.sample_rate)
 
         # strictly select the canonical features in the canonical order
@@ -183,9 +244,12 @@ class ParquetTimeSeriesDataset(Dataset):
             raise KeyError(f"File {fn} is missing expected features: {missing[:8]}...")
 
         feat_mat = df.loc[:, self.feat_cols].to_numpy(dtype=np.float32)
+        if not np.isfinite(feat_mat).all():
+            feat_mat = np.nan_to_num(feat_mat, nan=0.0, posinf=0.0, neginf=0.0)
 
         # scale once per file
-        feat_mat = self.scaler.transform(feat_mat)
+        feat_mat = self.scaler.transform(feat_mat).astype(np.float32, copy=False)
+        feat_mat = np.nan_to_num(feat_mat, nan=0.0, posinf=0.0, neginf=0.0)
 
         # cache (tiny LRU)
         self._cache[file_i] = (feat_mat, time_arr)

@@ -1,11 +1,11 @@
 {
-  "TP": 2936,
-  "TN": 9769,
-  "FP": 1028,
-  "FN": 2677,
-  "FPR_percent": 9.5212,
-  "F1_percent_at_val_thr": 61.3136,
-  "val_selected_threshold": 0.498216,
-  "ROC_AUC": 0.714595,
-  "PR_AUC": 0.67156
+  "TP": 4625,
+  "TN": 10277,
+  "FP": 527,
+  "FN": 981,
+  "FPR_percent": 4.8778,
+  "F1_percent_at_val_thr": 85.9825,
+  "val_selected_threshold": 0.161939,
+  "ROC_AUC": 0.892675,
+  "PR_AUC": 0.844207
 }

@@ -181,3 +181,4 @@ mlruns/*
 *.npy
 models/*
 external_libs/PredTrAD/data/*
+*.pt
