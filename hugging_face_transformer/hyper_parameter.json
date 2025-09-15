@@ -4,14 +4,14 @@
     "pred_ms":     50,
     "stride_ms":   50,
   
-    "batch_size":      64,
+    "batch_size":      8,
     "epochs":          50,
     "learning_rate":   0.0005,
   
     "d_model":             256,
-    "nhead":               8,
-    "num_encoder_layers":  4,
-    "num_decoder_layers":  4,
+    "nhead":               4,
+    "num_encoder_layers":  3,
+    "num_decoder_layers":  2,
     "dim_feedforward":     512,
     "dropout":             0.1,
   

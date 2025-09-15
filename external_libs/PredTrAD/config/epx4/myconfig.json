@@ -1,32 +1,39 @@
 {
   "data_pattern":        "data/myData/*.parquet",
+
   "window_size":         180,
   "stride_size":         20,
   "feature_min":         0.0,
   "feature_max":         1.0,
-  "level1_filter":       "",
-  "d_model":             256,
-  "nhead":               8,
-  "num_encoder_layers":  4,
-  "num_decoder_layers":  4,
-  "dim_feedforward":     512,
-  "dropout":             0.1,
 
-  "model_name":          "PredTrAD_v1",
+  "d_model":             384,
+  "nhead":               8,
+  "num_encoder_layers":  6,
+  "num_decoder_layers":  2,
+  "dim_feedforward":     1024,
+  "dropout":             0.05,
+
+  "model_name":          "PredTrAD_v2",
   "dataset":             "mydata",
   "entity":              "sensor1",
   "retrain":             true,
   "shuffle":             true,
   "val":                 0,
   "mlflow_experiment":   "Experiment_4",
-  "n_epochs":            10,
-  "hyp_lr":              0.0001,
+
+  "n_epochs":            60, 
+  "hyp_lr":              0.0005,
   "hyp_criterion":       "MSE",
   "hyp_percentage":      0.5,
 
   "init_score":          [],
-  "lm_d0":               0.99995,
-  "lm_d1":               1.06,
-  "delta":               1.0,
-  "batch_size":          16
+  "lm_d0":               0.995, 
+  "lm_d1":               1.20,
+  "delta":               0.5,
+  "batch_size":          32,
+  "val_every": 1,
+  "scaler": "sk_minmax",
+  "val_split_files": 0, 
+  "val_split_frac": 0
+
 }

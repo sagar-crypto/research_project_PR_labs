@@ -62,15 +62,12 @@ class TransformerAutoencoder(nn.Module):
         self.window_len = window_len
         self.pred_len = pred_len
 
-        # 1) Input projection for both src and tgt
         self.src_embed = nn.Linear(d_in, d_model)
         self.tgt_embed = nn.Linear(d_in, d_model)
 
-        # 2) Positional encoding
         self.pos_encoder = PositionalEncoding(d_model, dropout, max_len=window_len)
         self.dropout = nn.Dropout(dropout)
 
-        # 3) Transformer Encoder
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -83,7 +80,6 @@ class TransformerAutoencoder(nn.Module):
             num_layers=num_encoder_layers
         )
 
-        # 4) Transformer Decoder
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -96,7 +92,6 @@ class TransformerAutoencoder(nn.Module):
             num_layers=num_decoder_layers
         )
 
-        # 5) Single linear head: map d_model → d_in (forecast features)
         self.output_head = nn.Linear(d_model, d_in)
         self._reset_parameters()
 
@@ -128,18 +123,15 @@ class TransformerAutoencoder(nn.Module):
         Returns:
             forecast:  (batch_size, pred_len, d_in)
         """
-        # 1) Project & encode source
         src_emb = self.src_embed(src) * math.sqrt(self.d_model)
         src_emb = self.pos_encoder(src_emb)
         src_emb = self.dropout(src_emb)
         memory  = self.encoder(src_emb)
 
-        # 2) decoder embed+pos+drop
         tgt_emb = self.tgt_embed(tgt_input) * math.sqrt(self.d_model)
         tgt_emb = self.pos_encoder(tgt_emb)
         tgt_emb = self.dropout(tgt_emb)
 
-        # 3) (optional) causal mask for autoregressive forecasting
         tgt_mask = self._generate_square_subsequent_mask(tgt_emb.size(1)).to(src.device)
 
         decoded = self.decoder(
@@ -148,6 +140,36 @@ class TransformerAutoencoder(nn.Module):
             tgt_mask=tgt_mask
         )
 
-        # 4) project back to feature space
         return self.output_head(decoded)
+
+    def encode(self, src: torch.Tensor) -> torch.Tensor:
+        """
+        Runs the encoder part only.
+        Args:  src: (B, L_ctx, d_in)
+        Returns: encoder memory H: (B, L_ctx, d_model)
+        """
+        x = self.src_embed(src) * math.sqrt(self.d_model)
+        x = self.pos_encoder(x)
+        x = self.dropout(x)
+        H = self.encoder(x)       # (B, L, d_model)
+        return H
+    
+
+class FaultClassifier(nn.Module):
+    """
+    Pools encoder features from a pretrained TransformerAutoencoder
+    and predicts fault / no-fault.
+    """
+    def __init__(self, backbone: TransformerAutoencoder, dropout: float = 0.1, pool: str = "mean"):
+        super().__init__()
+        self.backbone = backbone
+        self.pool = pool
+        self.drop = nn.Dropout(dropout)
+        self.head = nn.Linear(backbone.d_model, 1)  # binary
+
+    def forward(self, src: torch.Tensor) -> torch.Tensor:
+        H = self.backbone.encode(src)               # (B, L, d_model)
+        z = H.mean(dim=1) if self.pool == "mean" else H[:, -1, :]
+        z = self.drop(z)
+        return self.head(z).squeeze(-1)             # (B,)
 

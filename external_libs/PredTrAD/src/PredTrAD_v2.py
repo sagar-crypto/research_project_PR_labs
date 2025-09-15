@@ -4,6 +4,25 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import math
+from typing import Optional
+
+
+def cast_like(x: Optional[torch.Tensor],
+              ref: torch.Tensor,
+              *,
+              prefer_bool: bool = False) -> Optional[torch.Tensor]:
+    """Match dtype & device of `ref` (or force bool if prefer_bool=True)."""
+    if x is None:
+        return None
+    if prefer_bool:
+        if x.dtype is not torch.bool:
+            x = x.to(torch.bool)
+    else:
+        if x.dtype != ref.dtype:
+            x = x.to(dtype=ref.dtype)
+    if x.device != ref.device:
+        x = x.to(ref.device)
+    return x
 
 class PositionwiseFeedForward(nn.Module):
   def __init__(self, d_model, hidden, drop_prob=0.1):
@@ -80,6 +99,13 @@ class TransformerDecoderLayer(nn.Module):
         self.dropout3 = nn.Dropout(dropout)
 
     def forward(self, tgt, memory, tgt_mask=None):
+        if tgt_mask is not None:
+            if tgt_mask.dtype == torch.float64:
+                tgt_mask = tgt_mask.to(torch.float32)
+            elif tgt_mask.dtype not in (torch.bool, tgt.dtype):
+                tgt_mask = tgt_mask.to(dtype=tgt.dtype)
+            if tgt_mask.device != tgt.device:
+                tgt_mask = tgt_mask.to(tgt.device)
         tgt2, _ = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask)
         tgt = tgt + self.dropout1(tgt2)
         tgt2 = self.norm1(tgt)
@@ -166,7 +192,11 @@ class PredTrAD_v2(nn.Module):
         for layer in self.transformer_encoder:
             src = layer(src)
 
-        tgt_mask = self.generate_square_subsequent_mask(tgt.size(1)).to(tgt.device)
+        tgt_mask = self.generate_square_subsequent_mask(
+            tgt.size(1),
+            device=tgt.device,
+            dtype=tgt.dtype,
+        )
         # Decoder
         for layer in self.transformer_decoder:
             tgt = layer(tgt, src, tgt_mask=tgt_mask)
@@ -182,9 +212,9 @@ class PredTrAD_v2(nn.Module):
 
         return self.fc(x4)
     
-    def generate_square_subsequent_mask(self, sz):
-        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-        mask = mask.double().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+    def generate_square_subsequent_mask(self, L: int, *, device=None, dtype=torch.float32) -> torch.Tensor:
+        mask = torch.zeros((L, L), dtype=dtype, device=device)
+        fut  = torch.triu(torch.ones(L, L, dtype=torch.bool, device=device), diagonal=1)
+        mask = mask.masked_fill(fut, float('-inf'))
         return mask
-
 
