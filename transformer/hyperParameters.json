@@ -1,5 +1,5 @@
 {
-    "sample_rate":     7200.0,
+    "sample_rate":     6410.0,
     "window_ms":       100.0,
     "pred_ms":         50.0,
     "stride_ms":       50.0,
@@ -9,7 +9,7 @@
     "mode":            "forecast",
   
     "batch_size":      64,
-    "epochs":          50,
+    "epochs":          30,
     "learning_rate":   0.0005,
   
     "d_model":             256,

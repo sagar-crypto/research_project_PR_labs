@@ -15,12 +15,14 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import (
     accuracy_score, precision_recall_fscore_support, roc_auc_score,
-    f1_score, precision_recall_curve, average_precision_score
+    f1_score, precision_recall_curve, average_precision_score, roc_curve
 )
 
 from transformer.data_processing import TransformerWindowDataset
 from transformer.model import TransformerAutoencoder, FaultClassifier
 from transformer.utils_label import make_event_map
+import random
+from torch.utils.data import Subset
 
 from config import DATA_PATH, CHECKPOINT_TRANSFORMERS_DIR, TRANSFORMERS_DIR, CLUSTERING_TRANSFORMERS_DIR
 
@@ -32,6 +34,11 @@ FREEZE_EPOCHS = 2               # keep backbone frozen for first N epochs
 HEAD_DROPOUT = 0.10             # regularization in the head
 UNFREEZE_LAYERS = ("backbone.encoder",)  # name patterns to unfreeze later
 RUN_ALIGNMENT_AUDIT = True      # set False after you’re confident
+
+SEED = 42                       # set None to disable seeding
+TARGET_PRECISION = 0.80         # set None to disable precision-target threshold
+TARGET_FPR = None               # e.g., 0.03 for 3% FPR; set None to disable
+K_SMOOTH = 3                    # require K consecutive positives; set None to disable
 
 LABELS_CSV = os.getenv("LABELS_CSV", "/home/vault/iwi5/iwi5305h/new_dataset_90kv/labels_for_parquet.csv")
 CFG_PATH   = os.path.join(TRANSFORMERS_DIR, "hyperParameters.json")
@@ -210,6 +217,49 @@ def audit_alignment(events_map, data_glob, sample_rate, window_ms, stride_ms, ds
     print(f"[audit] expected pos-rate (milliseconds):  mean={np.mean(rates_ms):.4f} over {len(rates_ms)} files")
     print(f"[audit] actual dataset pos-rate (approx):  {actual:.4f}")
 
+
+# ---------- threshold helpers ----------
+
+def tau_for_target_precision(y_true: np.ndarray, probs: np.ndarray, target: float):
+    """Return highest τ with precision >= target (or None if unreachable)."""
+    P, R, T = precision_recall_curve(y_true, probs)
+    if len(T) == 0:
+        return None
+    mask = P[:-1] >= float(target)
+    if np.any(mask):
+        return float(T[mask].max())
+    return None
+
+def tau_for_target_fpr(y_true: np.ndarray, probs: np.ndarray, target_fpr: float):
+    """Return τ closest to the requested FPR in [0,1]."""
+    fpr, tpr, thr = roc_curve(y_true, probs)
+    if len(thr) == 0:
+        return None
+    i = int(np.argmin(np.abs(fpr - float(target_fpr))))
+    return float(thr[i])
+
+def consec_k(pred: np.ndarray, k: int = 3) -> np.ndarray:
+    """1 where there are >=k consecutive positives in pred."""
+    run = 0
+    out = np.zeros_like(pred, dtype=np.int64)
+    for i, p in enumerate(pred.astype(int)):
+        run = run + 1 if p else 0
+        out[i] = 1 if run >= k else 0
+    return out
+
+def confusion_from_binary(pred: np.ndarray, y: np.ndarray):
+    pred = pred.astype(int); y = y.astype(int)
+    tp = int(((pred == 1) & (y == 1)).sum())
+    tn = int(((pred == 0) & (y == 0)).sum())
+    fp = int(((pred == 1) & (y == 0)).sum())
+    fn = int(((pred == 0) & (y == 1)).sum())
+    fpr = (fp / max(1, fp + tn)) * 100.0
+    prec = tp / max(1, tp + fp)
+    rec  = tp / max(1, tp + fn)
+    f1   = 2 * prec * rec / max(1e-12, (prec + rec))
+    return tp, tn, fp, fn, fpr, f1
+
+
 # ---------- training epoch ----------
 
 def run_epoch(clf, loader, device, criterion=None, optimizer=None):
@@ -286,6 +336,19 @@ def make_two_group_optimizer(clf, lr_head=1e-3, lr_enc=3e-4, wd=1e-4):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = load_cfg(CFG_PATH)
+    # Determinism
+    if SEED is not None:
+        torch.manual_seed(SEED)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(SEED)
+        np.random.seed(SEED)
+        random.seed(SEED)
+        try:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        except Exception:
+            pass
+
     events_map = make_event_map(LABELS_CSV)  # dict: "replica_123" -> (start_s, end_s) or list of such
 
     ds = TransformerWindowDataset(
@@ -302,10 +365,35 @@ def main():
     )
 
     # --- split (note: true group-split by file is better; this is a simple random split) ---
-    n_train = int(0.70 * len(ds))
-    n_val   = int(0.15 * len(ds))
-    n_test  = len(ds) - n_train - n_val
-    train_ds, val_ds, test_ds = random_split(ds, [n_train, n_val, n_test])
+    n_files = len(ds.paths)
+    n_train_f = int(0.70 * n_files)
+    n_val_f   = int(0.15 * n_files)
+
+    idx_files = np.arange(n_files)
+    rng = np.random.RandomState(SEED if SEED is not None else 42)
+    rng.shuffle(idx_files)
+
+    train_files = set(idx_files[:n_train_f])
+    val_files   = set(idx_files[n_train_f:n_train_f + n_val_f])
+    test_files  = set(idx_files[n_train_f + n_val_f:])
+
+    # map each window index -> file index via cum_counts
+    file_id_of_idx = np.empty(len(ds), dtype=np.int32)
+    for fi in range(n_files):
+        a, b = ds.cum_counts[fi], ds.cum_counts[fi + 1]
+        file_id_of_idx[a:b] = fi
+
+    train_idx = np.where(np.isin(file_id_of_idx, list(train_files)))[0]
+    val_idx   = np.where(np.isin(file_id_of_idx, list(val_files)))[0]
+    test_idx  = np.where(np.isin(file_id_of_idx, list(test_files)))[0]
+
+    train_idx_list = [int(i) for i in np.asarray(train_idx).ravel()]
+    val_idx_list   = [int(i) for i in np.asarray(val_idx).ravel()]
+    test_idx_list  = [int(i) for i in np.asarray(test_idx).ravel()]
+
+    train_ds = Subset(ds, train_idx_list)
+    val_ds   = Subset(ds, val_idx_list)
+    test_ds  = Subset(ds, test_idx_list)
 
     # --- sampler: balance batches ---
     sampler = make_weighted_sampler(train_ds)
@@ -425,6 +513,16 @@ def main():
         clf.load_state_dict(best["state"], strict=False)
         clf.eval()
 
+        # collect VAL again for policy thresholds
+        val_logits2, val_y2 = collect_logits(clf, val_loader, device)
+        val_probs2 = torch.sigmoid(val_logits2).cpu().numpy()
+        val_y_np2  = val_y2.cpu().numpy().astype(int)
+
+        # collect TEST
+        test_logits, test_y = collect_logits(clf, test_loader, device)
+        test_probs = torch.sigmoid(test_logits).cpu().numpy()
+        test_y_np  = test_y.cpu().numpy().astype(int)
+
         test_logits, test_y = collect_logits(clf, test_loader, device)
         test_probs = torch.sigmoid(test_logits).cpu().numpy()
         test_y_np  = test_y.cpu().numpy().astype(int)
@@ -461,6 +559,65 @@ def main():
                 "TN_at_fallback_thr": tn_q,
                 "FN_at_fallback_thr": fn_q,
             })
+
+        # --- Optional: target operating points ---
+        # Precision target
+        tau_prec = None
+        if TARGET_PRECISION is not None:
+            tau_prec = tau_for_target_precision(val_y_np2, val_probs2, TARGET_PRECISION)
+            if tau_prec is not None:
+                pred = (test_probs >= tau_prec).astype(int)
+                tp2, tn2, fp2, fn2, fpr2, f12 = confusion_from_binary(pred, test_y_np)
+                prec2 = tp2 / max(1, tp2 + fp2)
+                rec2  = tp2 / max(1, tp2 + fn2)
+                out_json.update({
+                    "target_precision": float(TARGET_PRECISION),
+                    "tau_at_target_precision": round(float(tau_prec), 6),
+                    "precision_at_target_tau": round(float(prec2), 4),
+                    "recall_at_target_tau": round(float(rec2), 4),
+                    "F1_percent_at_target_tau": round(float(f12*100), 4),
+                    "FPR_percent_at_target_tau": round(float(fpr2), 4),
+                    "TP_at_target_tau": tp2, "FP_at_target_tau": fp2,
+                    "TN_at_target_tau": tn2, "FN_at_target_tau": fn2,
+                })
+
+        # FPR target
+        if TARGET_FPR is not None:
+            tau_fpr = tau_for_target_fpr(val_y_np2, val_probs2, TARGET_FPR)
+            if tau_fpr is not None:
+                pred = (test_probs >= tau_fpr).astype(int)
+                tp3, tn3, fp3, fn3, fpr3, f13 = confusion_from_binary(pred, test_y_np)
+                prec3 = tp3 / max(1, tp3 + fp3)
+                rec3  = tp3 / max(1, tp3 + fn3)
+                out_json.update({
+                    "target_fpr": float(TARGET_FPR),
+                    "tau_at_target_fpr": round(float(tau_fpr), 6),
+                    "precision_at_fpr_tau": round(float(prec3), 4),
+                    "recall_at_fpr_tau": round(float(rec3), 4),
+                    "F1_percent_at_fpr_tau": round(float(f13*100), 4),
+                    "FPR_percent_at_fpr_tau": round(float(fpr3), 4),
+                    "TP_at_fpr_tau": tp3, "FP_at_fpr_tau": fp3,
+                    "TN_at_fpr_tau": tn3, "FN_at_fpr_tau": fn3,
+                })
+
+        # --- Optional: K-consecutive smoothing on VAL-threshold predictions ---
+        if K_SMOOTH is not None and K_SMOOTH > 1:
+            thr_val = float(best["thr"])  # ensure you still have this above
+            pred_raw = (test_probs >= thr_val).astype(int)
+            pred_evt = consec_k(pred_raw, k=int(K_SMOOTH))
+            tp_s, tn_s, fp_s, fn_s, fpr_s, f1_s = confusion_from_binary(pred_evt, test_y_np)
+            prec_s = tp_s / max(1, tp_s + fp_s)
+            rec_s  = tp_s / max(1, tp_s + fn_s)
+            out_json.update({
+                "k_smooth": int(K_SMOOTH),
+                "precision_at_val_thr_smoothed": round(float(prec_s), 4),
+                "recall_at_val_thr_smoothed": round(float(rec_s), 4),
+                "F1_percent_at_val_thr_smoothed": round(float(f1_s*100), 4),
+                "FPR_percent_at_val_thr_smoothed": round(float(fpr_s), 4),
+                "TP_at_val_thr_smoothed": tp_s, "FP_at_val_thr_smoothed": fp_s,
+                "TN_at_val_thr_smoothed": tn_s, "FN_at_val_thr_smoothed": fn_s,
+            })
+
 
         with open(os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "fault_classifier_metrics.json"), "w") as f:
             json.dump(out_json, f, indent=2)
