@@ -40,4 +40,4 @@ cd /home/hpc/iwi5/iwi5305h/research_project_PR_labs  # Replace with your script 
 # ===============================
 
 # Run the Optuna-based FixMatch HPO Python script with necessary arguments
-python3 -m hugging_face_transformer.train
+python3 -m hugging_face_transformer.train_linear_head

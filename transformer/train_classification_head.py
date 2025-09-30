@@ -1,3 +1,4 @@
+# train_classification_head.py
 import sys
 from pathlib import Path
 import pandas as pd
@@ -23,34 +24,22 @@ from transformer.model import TransformerAutoencoder, FaultClassifier
 from transformer.utils_label import make_event_map
 import random
 from torch.utils.data import Subset
+from transformer.v2_head import FaultClassifierV2
 
-from config import DATA_PATH, CHECKPOINT_TRANSFORMERS_DIR, TRANSFORMERS_DIR, CLUSTERING_TRANSFORMERS_DIR
+from config import DATA_PATH, CHECKPOINT_TRANSFORMERS_DIR, TRANSFORMERS_DIR, CLASSIFY_CFG_PATH
 
-# =============================
-# Hyperparameters / knobs
-# =============================
-CLS_EPOCHS = 40                 # total classification epochs
-FREEZE_EPOCHS = 2               # keep backbone frozen for first N epochs
-HEAD_DROPOUT = 0.10             # regularization in the head
-UNFREEZE_LAYERS = ("backbone.encoder",)  # name patterns to unfreeze later
-RUN_ALIGNMENT_AUDIT = True      # set False after you’re confident
-
-SEED = 42                       # set None to disable seeding
-TARGET_PRECISION = 0.80         # set None to disable precision-target threshold
-TARGET_FPR = None               # e.g., 0.03 for 3% FPR; set None to disable
-K_SMOOTH = 3                    # require K consecutive positives; set None to disable
-
-LABELS_CSV = os.getenv("LABELS_CSV", "/home/vault/iwi5/iwi5305h/new_dataset_90kv/labels_for_parquet.csv")
-CFG_PATH   = os.path.join(TRANSFORMERS_DIR, "hyperParameters.json")
-
-# =============================
-# Utilities
-# =============================
+# -----------------------------
+# Config helpers
+# -----------------------------
+CFG_PATH             = os.path.join(TRANSFORMERS_DIR, "hyperParameters.json")   # model/data hyperparams
 
 def load_cfg(p):
     with open(p, "r") as f:
         return json.load(f)
 
+# -----------------------------
+# Dataloader helpers
+# -----------------------------
 def collate_classify(batch):
     xs, ys = zip(*batch)  # list of tensors, list of scalars/tensors
     xs = torch.stack([x.contiguous() for x in xs], 0)  # (B, L, D)
@@ -95,6 +84,9 @@ def collect_logits(clf, loader, device):
         all_y.append(y)
     return torch.cat(all_logits, 0), torch.cat(all_y, 0)
 
+# -----------------------------
+# Threshold helpers
+# -----------------------------
 def tune_threshold(probs: np.ndarray, y_np: np.ndarray) -> Tuple[float, float]:
     ths = np.linspace(0.05, 0.95, 19)
     f1s = np.array([
@@ -130,8 +122,45 @@ def confusion_from_probs(probs: np.ndarray, y: np.ndarray, thr: float):
     f1   = 2 * prec * rec / max(1e-12, (prec + rec))
     return tp, tn, fp, fn, fpr, f1
 
-# ---------- interval helpers for the audit ----------
+def tau_for_target_precision(y_true: np.ndarray, probs: np.ndarray, target: float):
+    P, R, T = precision_recall_curve(y_true, probs)
+    if len(T) == 0:
+        return None
+    mask = P[:-1] >= float(target)
+    if np.any(mask):
+        return float(T[mask].max())
+    return None
 
+def tau_for_target_fpr(y_true: np.ndarray, probs: np.ndarray, target_fpr: float):
+    fpr, tpr, thr = roc_curve(y_true, probs)
+    if len(thr) == 0:
+        return None
+    i = int(np.argmin(np.abs(fpr - float(target_fpr))))
+    return float(thr[i])
+
+def consec_k(pred: np.ndarray, k: int = 3) -> np.ndarray:
+    run = 0
+    out = np.zeros_like(pred, dtype=np.int64)
+    for i, p in enumerate(pred.astype(int)):
+        run = run + 1 if p else 0
+        out[i] = 1 if run >= k else 0
+    return out
+
+def confusion_from_binary(pred: np.ndarray, y: np.ndarray):
+    pred = pred.astype(int); y = y.astype(int)
+    tp = int(((pred == 1) & (y == 1)).sum())
+    tn = int(((pred == 0) & (y == 0)).sum())
+    fp = int(((pred == 1) & (y == 0)).sum())
+    fn = int(((pred == 0) & (y == 1)).sum())
+    fpr = (fp / max(1, fp + tn)) * 100.0
+    prec = tp / max(1, tp + fp)
+    rec  = tp / max(1, tp + fn)
+    f1   = 2 * prec * rec / max(1e-12, (prec + rec))
+    return tp, tn, fp, fn, fpr, f1
+
+# -----------------------------
+# Alignment audit helpers
+# -----------------------------
 def _window_labels_from_intervals(n_samples, intervals_idx, win, stride):
     y = np.zeros(n_samples, dtype=np.uint8)
     for s, e in intervals_idx:
@@ -144,7 +173,6 @@ def _window_labels_from_intervals(n_samples, intervals_idx, win, stride):
         labels.append(1 if y[start:start+win].any() else 0)
     return np.array(labels, dtype=np.uint8)
 
-
 def _iter_intervals(se_any):
     if isinstance(se_any, tuple) and len(se_any) == 2:
         return [(float(se_any[0]), float(se_any[1]))]
@@ -155,7 +183,6 @@ def _iter_intervals(se_any):
                 out.append((float(it[0]), float(it[1])))
         return out
     return []
-
 
 def _expected_pos_rate(parquet_path, se_list, sample_rate, window_ms, stride_ms,
                        unit="sec", offset_sec=0.0) -> float:
@@ -189,7 +216,6 @@ def _expected_pos_rate(parquet_path, se_list, sample_rate, window_ms, stride_ms,
     wlbl = _window_labels_from_intervals(n, intervals_idx, win, stride)
     return float(wlbl.mean())
 
-
 def _actual_pos_rate_from_dataset(ds, sample=2000):
     cnt, pos = 0, 0
     limit = min(sample, len(ds))
@@ -198,7 +224,6 @@ def _actual_pos_rate_from_dataset(ds, sample=2000):
         yy = int(y.item() if torch.is_tensor(y) else y)
         pos += yy; cnt += 1
     return (pos / max(1, cnt))
-
 
 def audit_alignment(events_map, data_glob, sample_rate, window_ms, stride_ms, ds, max_files=20):
     files = sorted(glob(data_glob))[:max_files]
@@ -217,51 +242,9 @@ def audit_alignment(events_map, data_glob, sample_rate, window_ms, stride_ms, ds
     print(f"[audit] expected pos-rate (milliseconds):  mean={np.mean(rates_ms):.4f} over {len(rates_ms)} files")
     print(f"[audit] actual dataset pos-rate (approx):  {actual:.4f}")
 
-
-# ---------- threshold helpers ----------
-
-def tau_for_target_precision(y_true: np.ndarray, probs: np.ndarray, target: float):
-    """Return highest τ with precision >= target (or None if unreachable)."""
-    P, R, T = precision_recall_curve(y_true, probs)
-    if len(T) == 0:
-        return None
-    mask = P[:-1] >= float(target)
-    if np.any(mask):
-        return float(T[mask].max())
-    return None
-
-def tau_for_target_fpr(y_true: np.ndarray, probs: np.ndarray, target_fpr: float):
-    """Return τ closest to the requested FPR in [0,1]."""
-    fpr, tpr, thr = roc_curve(y_true, probs)
-    if len(thr) == 0:
-        return None
-    i = int(np.argmin(np.abs(fpr - float(target_fpr))))
-    return float(thr[i])
-
-def consec_k(pred: np.ndarray, k: int = 3) -> np.ndarray:
-    """1 where there are >=k consecutive positives in pred."""
-    run = 0
-    out = np.zeros_like(pred, dtype=np.int64)
-    for i, p in enumerate(pred.astype(int)):
-        run = run + 1 if p else 0
-        out[i] = 1 if run >= k else 0
-    return out
-
-def confusion_from_binary(pred: np.ndarray, y: np.ndarray):
-    pred = pred.astype(int); y = y.astype(int)
-    tp = int(((pred == 1) & (y == 1)).sum())
-    tn = int(((pred == 0) & (y == 0)).sum())
-    fp = int(((pred == 1) & (y == 0)).sum())
-    fn = int(((pred == 0) & (y == 1)).sum())
-    fpr = (fp / max(1, fp + tn)) * 100.0
-    prec = tp / max(1, tp + fp)
-    rec  = tp / max(1, tp + fn)
-    f1   = 2 * prec * rec / max(1e-12, (prec + rec))
-    return tp, tn, fp, fn, fpr, f1
-
-
-# ---------- training epoch ----------
-
+# -----------------------------
+# Training epoch
+# -----------------------------
 def run_epoch(clf, loader, device, criterion=None, optimizer=None):
     train = optimizer is not None
     clf.train(train)
@@ -300,8 +283,9 @@ def run_epoch(clf, loader, device, criterion=None, optimizer=None):
     avg_loss = (total_loss / len(loader.dataset)) if criterion is not None else float("nan")
     return avg_loss, acc, prec, rec, f1, auroc
 
-# ---------- unfreeze helpers ----------
-
+# -----------------------------
+# Unfreeze + optimizer helpers
+# -----------------------------
 def unfreeze_encoder(clf, patterns=("backbone.encoder",)):
     """
     Enable grads for encoder params whose names contain any of patterns.
@@ -316,7 +300,6 @@ def unfreeze_encoder(clf, patterns=("backbone.encoder",)):
             matched.append(full)
     return matched
 
-
 def make_two_group_optimizer(clf, lr_head=1e-3, lr_enc=3e-4, wd=1e-4):
     head_params, enc_params = [], []
     for n, p in clf.named_parameters():
@@ -329,13 +312,55 @@ def make_two_group_optimizer(clf, lr_head=1e-3, lr_enc=3e-4, wd=1e-4):
     print(f"[optim] head params: {len(head_params)} | encoder params: {len(enc_params)}")
     return optim.Adam(groups)
 
-# =============================
-# Main
-# =============================
+# -----------------------------
+# Build classifier from config
+# -----------------------------
+def build_classifier(backbone, head_cfg):
+    name = (head_cfg.get("name") or "linear_mean").lower()
+    dropout = float(head_cfg.get("dropout", 0.10))
+    if name == "linear_mean":
+        return FaultClassifier(backbone, dropout=dropout, pool="mean")
+    elif name == "linear_last":
+        return FaultClassifier(backbone, dropout=dropout, pool="last")
+    elif name == "v2":
+        return FaultClassifierV2(backbone, dropout=dropout)
+    else:
+        raise ValueError(f"Unknown head name: {name!r}. Use 'linear_mean', 'linear_last', or 'v2'.")
 
+# -----------------------------
+# Main
+# -----------------------------
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cfg = load_cfg(CFG_PATH)
+
+    # Load configs
+    model_cfg = load_cfg(CFG_PATH)                # data/model hyperparams (existing file)
+    clf_cfg   = load_cfg(CLASSIFY_CFG_PATH)       # training + head choice (new file)
+
+    # ----- globals-from-config (kept local to main) -----
+    SEED = clf_cfg.get("seed", None)
+    RUN_ALIGNMENT_AUDIT = bool(clf_cfg.get("run_alignment_audit", True))
+
+    thr_cfg = clf_cfg.get("thresholding", {})
+    TARGET_PRECISION = thr_cfg.get("target_precision", None)
+    TARGET_FPR       = thr_cfg.get("target_fpr", None)
+    K_SMOOTH         = thr_cfg.get("k_smooth", 3)
+
+    LABELS_CSV = os.getenv("LABELS_CSV") or clf_cfg.get("labels_csv")
+    if not LABELS_CSV:
+        raise ValueError("labels_csv not set (and LABELS_CSV env not provided).")
+
+    CLS_EPOCHS    = int(clf_cfg.get("epochs", 40))
+    FREEZE_EPOCHS = int(clf_cfg.get("freeze_epochs", 2))
+    UNFREEZE_LAYERS = tuple(clf_cfg.get("unfreeze_layers", ["backbone.encoder"]))
+
+    opt_cfg = clf_cfg.get("optimizer", {})
+    LR_HEAD = float(opt_cfg.get("lr_head", 1e-3))
+    LR_ENC  = float(opt_cfg.get("lr_encoder", 3e-4))
+    WD      = float(opt_cfg.get("weight_decay", 1e-4))
+
+    head_cfg = clf_cfg.get("head", {})
+
     # Determinism
     if SEED is not None:
         torch.manual_seed(SEED)
@@ -353,18 +378,18 @@ def main():
 
     ds = TransformerWindowDataset(
         pattern      = f"{DATA_PATH}/replica_*.parquet",
-        sample_rate  = cfg["sample_rate"],
-        window_ms    = cfg["window_ms"],
-        pred_ms      = cfg["pred_ms"],
-        stride_ms    = cfg["stride_ms"],
-        feature_range= (cfg.get("feature_min",0.0), cfg.get("feature_max",1.0)),
+        sample_rate  = model_cfg["sample_rate"],
+        window_ms    = model_cfg["window_ms"],
+        pred_ms      = model_cfg["pred_ms"],
+        stride_ms    = model_cfg["stride_ms"],
+        feature_range= (model_cfg.get("feature_min",0.0), model_cfg.get("feature_max",1.0)),
         level1_filter="",
         mode         ="classify",
         events_map   = events_map,
         label_scope  ="window",
     )
 
-    # --- split (note: true group-split by file is better; this is a simple random split) ---
+    # --- group split by files (train/val/test) ---
     n_files = len(ds.paths)
     n_train_f = int(0.70 * n_files)
     n_val_f   = int(0.15 * n_files)
@@ -399,7 +424,7 @@ def main():
     sampler = make_weighted_sampler(train_ds)
 
     num_workers = min(8, max(1, (os.cpu_count() or 4) - 2))
-    bsz = cfg.get("batch_size", 64)
+    bsz = model_cfg.get("batch_size", 64)
 
     train_loader = DataLoader(
         train_ds, batch_size=bsz, sampler=sampler, shuffle=False,
@@ -417,14 +442,15 @@ def main():
         drop_last=False, collate_fn=collate_classify
     )
 
+    # --- backbone ---
     backbone = TransformerAutoencoder(
         d_in=len(ds.keep_cols),
-        d_model=cfg.get("d_model", 256),
-        nhead=cfg.get("nhead", 8),
-        num_encoder_layers=cfg.get("num_encoder_layers", 4),
-        num_decoder_layers=cfg.get("num_decoder_layers", 4),
-        dim_feedforward=cfg.get("dim_feedforward", 512),
-        dropout=cfg.get("dropout", 0.1),
+        d_model=model_cfg.get("d_model", 256),
+        nhead=model_cfg.get("nhead", 8),
+        num_encoder_layers=model_cfg.get("num_encoder_layers", 4),
+        num_decoder_layers=model_cfg.get("num_decoder_layers", 4),
+        dim_feedforward=model_cfg.get("dim_feedforward", 512),
+        dropout=model_cfg.get("dropout", 0.1),
         window_len=ds.window_len,
         pred_len=ds.pred_len
     ).to(device)
@@ -438,7 +464,8 @@ def main():
     else:
         print("⚠️  No forecasting checkpoint found; training classifier from random backbone.")
 
-    clf = FaultClassifier(backbone, dropout=HEAD_DROPOUT, pool="mean").to(device)
+    # --- head from config ---
+    clf = build_classifier(backbone, head_cfg).to(device)
 
     # freeze backbone at start
     for p in clf.backbone.parameters():
@@ -447,7 +474,8 @@ def main():
     sanity_forward(clf, train_loader, device)
 
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam((p for p in clf.parameters() if p.requires_grad), lr=1e-3, weight_decay=1e-4)
+    optimizer = optim.Adam((p for p in clf.parameters() if p.requires_grad),
+                           lr=LR_HEAD, weight_decay=WD)
 
     best = {"f1": -1.0, "state": None, "thr": 0.5}
 
@@ -455,9 +483,9 @@ def main():
         audit_alignment(
             events_map = events_map,
             data_glob  = f"{DATA_PATH}/replica_*.parquet",
-            sample_rate= cfg["sample_rate"],
-            window_ms  = cfg["window_ms"],
-            stride_ms  = cfg["stride_ms"],
+            sample_rate= model_cfg["sample_rate"],
+            window_ms  = model_cfg["window_ms"],
+            stride_ms  = model_cfg["stride_ms"],
             ds         = ds,
             max_files  = 30,
         )
@@ -474,8 +502,8 @@ def main():
             print(f"[unfreeze] enabled grads for {len(names)} params")
             if names:
                 print("[unfreeze] sample:", names[:5])
-            optimizer = make_two_group_optimizer(clf, lr_head=1e-3, lr_enc=3e-4, wd=1e-4)
-            print("🔓 Encoder unfrozen with two-group LRs (head=1e-3, enc=3e-4)")
+            optimizer = make_two_group_optimizer(clf, lr_head=LR_HEAD, lr_enc=LR_ENC, wd=WD)
+            print("🔓 Encoder unfrozen with two-group LRs (head=%.0e, enc=%.0e)" % (LR_HEAD, LR_ENC))
 
         # ---- train ----
         tr_loss, tr_acc, tr_p, tr_r, tr_f1, tr_auc = run_epoch(
@@ -488,7 +516,9 @@ def main():
         val_probs = torch.sigmoid(val_logits).cpu().numpy()
 
         # diagnostics
-        print("val probs: min/med/mean/max:", float(val_probs.min()), float(np.median(val_probs)), float(val_probs.mean()), float(val_probs.max()))
+        print("val probs: min/med/mean/max:",
+              float(val_probs.min()), float(np.median(val_probs)),
+              float(val_probs.mean()), float(val_probs.max()))
         print("val pos rate:", y_np.mean(), " frac>=0.5:", float((val_probs >= 0.5).mean()))
 
         with torch.no_grad():
@@ -523,10 +553,6 @@ def main():
         test_probs = torch.sigmoid(test_logits).cpu().numpy()
         test_y_np  = test_y.cpu().numpy().astype(int)
 
-        test_logits, test_y = collect_logits(clf, test_loader, device)
-        test_probs = torch.sigmoid(test_logits).cpu().numpy()
-        test_y_np  = test_y.cpu().numpy().astype(int)
-
         try:
             roc_auc = roc_auc_score(test_y_np, test_probs)
         except Exception:
@@ -537,6 +563,8 @@ def main():
         tp, tn, fp, fn, fpr, f1 = confusion_from_probs(test_probs, test_y_np, thr_val)
 
         out_json = {
+            "head_name": head_cfg.get("name", "linear_mean"),
+            "head_dropout": head_cfg.get("dropout", 0.10),
             "TP": tp, "TN": tn, "FP": fp, "FN": fn,
             "FPR_percent": round(fpr, 4),
             "F1_percent_at_val_thr": round(f1*100, 4),
@@ -561,8 +589,6 @@ def main():
             })
 
         # --- Optional: target operating points ---
-        # Precision target
-        tau_prec = None
         if TARGET_PRECISION is not None:
             tau_prec = tau_for_target_precision(val_y_np2, val_probs2, TARGET_PRECISION)
             if tau_prec is not None:
@@ -581,7 +607,6 @@ def main():
                     "TN_at_target_tau": tn2, "FN_at_target_tau": fn2,
                 })
 
-        # FPR target
         if TARGET_FPR is not None:
             tau_fpr = tau_for_target_fpr(val_y_np2, val_probs2, TARGET_FPR)
             if tau_fpr is not None:
@@ -602,7 +627,6 @@ def main():
 
         # --- Optional: K-consecutive smoothing on VAL-threshold predictions ---
         if K_SMOOTH is not None and K_SMOOTH > 1:
-            thr_val = float(best["thr"])  # ensure you still have this above
             pred_raw = (test_probs >= thr_val).astype(int)
             pred_evt = consec_k(pred_raw, k=int(K_SMOOTH))
             tp_s, tn_s, fp_s, fn_s, fpr_s, f1_s = confusion_from_binary(pred_evt, test_y_np)
@@ -618,18 +642,16 @@ def main():
                 "TN_at_val_thr_smoothed": tn_s, "FN_at_val_thr_smoothed": fn_s,
             })
 
-
+        # save metrics + artifacts
         with open(os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "fault_classifier_metrics.json"), "w") as f:
             json.dump(out_json, f, indent=2)
 
-        # PR curve + raw dumps
         P, R, T = precision_recall_curve(test_y_np, test_probs)
         pr_df = pd.DataFrame({"precision": P[:-1], "recall": R[:-1], "threshold": T})
         pr_df.to_csv(os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "fault_classifier_prcurve.csv"), index=False)
         np.save(os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "fault_classifier_test_probs.npy"), test_probs)
         np.save(os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "fault_classifier_test_labels.npy"), test_y_np)
 
-        # Save best weights + threshold
         out_path = os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "fault_classifier_head.pth")
         thr_path = os.path.join(CHECKPOINT_TRANSFORMERS_DIR, "fault_classifier_threshold.npy")
         torch.save(best["state"], out_path)
@@ -638,7 +660,6 @@ def main():
         print("✓ Wrote test metrics JSON and PR curve CSV.")
     else:
         print("No improvement recorded; nothing saved.")
-
 
 if __name__ == "__main__":
     main()

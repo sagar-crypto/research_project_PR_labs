@@ -1,0 +1,32 @@
+{
+    "seed": 42,
+    "run_alignment_audit": true,
+  
+    "labels_csv": "/home/vault/iwi5/iwi5305h/new_dataset_90kv/labels_for_parquet.csv",
+  
+    "epochs": 40,
+    "freeze_epochs": 2,
+  
+    "unfreeze_layers": ["backbone.encoder"],
+  
+    "optimizer": {
+      "lr_head": 0.001,
+      "lr_encoder": 0.0003,
+      "weight_decay": 0.0001
+    },
+  
+    "head": {
+      "name": "v2",
+      "dropout": 0.10,
+      "v2": {
+        "out_ch_after_1x1": 64
+      }
+    },
+  
+    "thresholding": {
+      "target_precision": 0.80,
+      "target_fpr": null,
+      "k_smooth": 3
+    }
+  }
+  

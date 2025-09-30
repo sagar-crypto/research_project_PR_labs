@@ -1,6 +1,7 @@
 from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_PATH = "/home/vault/iwi5/iwi5305h/new_dataset_90kv/all"
+CACHE_FILE_PATH = "/home/vault/iwi5/iwi5305h/new_dataset_90kv"
 DATA_PATH_PREDTRAD = "/home/vault/iwi5/iwi5305h/data_predtrad"
 CHECKPOINT_VAE_DIR = f"{PROJECT_ROOT}/checkpoints/VAE"
 CHECKPOINT_TRANSFORMERS_DIR = f"{PROJECT_ROOT}/checkpoints/transformers"
@@ -15,3 +16,4 @@ SCALER_VAE_DIR = f"{PROJECT_ROOT}/scalers/VAE"
 SCALER_PREDTRAD_DIR = f"{PROJECT_ROOT}/scalers/PredTraD"
 CLUSTERING_TRANSFORMERS_DIR = f"{PROJECT_ROOT}/clustering_img/Transformer_Cluster_Img"
 CLUSTERING_VAE_DIR = f"{PROJECT_ROOT}/clustering_img/VAE_Cluster_img"
+CLASSIFY_CFG_PATH = f"{PROJECT_ROOT}/transformer/clasify_config.json"
