@@ -33,6 +33,12 @@ def load_json(path: str | os.PathLike) -> Dict[str, Any]:
 
 # -------------------- Collate & Dataloader helpers -------------------- #
 def collate_classify(batch):
+    """
+    Batches (x, y) samples into tensors for classification training.
+    Key properties:
+    - Stacks variable tensors into shape (B, L, D)
+    - Ensures y is float32 tensor of shape (B,)
+    """
     xs, ys = zip(*batch)
     xs = torch.stack([x.contiguous() for x in xs], 0)  # (B, L, D)
     ys = torch.stack(
@@ -42,6 +48,11 @@ def collate_classify(batch):
 
 
 def _nrows_parquet(path):
+    """
+    Returns number of rows in a Parquet file using metadata when possible.
+    Key properties:
+    - Uses fast metadata access via pyarrow; falls back to full read if needed
+    """
     try:
         return pq.ParquetFile(path).metadata.num_rows  # fast, metadata only
     except Exception:
@@ -50,6 +61,11 @@ def _nrows_parquet(path):
 
 @torch.no_grad()
 def sanity_forward(clf, loader, device):
+    """
+    Runs a one-batch forward pass sanity check on the classifier.
+    Key properties:
+    - Prints tensor shapes for x, logits, and y to confirm data/model alignment
+    """
     clf.eval()
     x, y = next(iter(loader))
     x = x.to(device=device, dtype=torch.float32)
@@ -59,6 +75,12 @@ def sanity_forward(clf, loader, device):
 
 
 def make_weighted_sampler(subset):
+    """
+    Builds a weighted sampler for imbalanced binary classification.
+    Key properties:
+    - Computes inverse-frequency class weights
+    - Returns WeightedRandomSampler for balanced sampling
+    """
     labels = []
     for i in range(len(subset)):
         _, y = subset[i]
@@ -72,6 +94,12 @@ def make_weighted_sampler(subset):
 
 @torch.no_grad()
 def collect_logits(clf, loader, device):
+    """
+    Collects logits and labels from the model over a dataset.
+    Key properties:
+    - Runs model in eval mode with no grad
+    - Returns concatenated logits and labels as torch tensors
+    """
     clf.eval()
     all_logits, all_y = [], []
     for x, y in loader:
@@ -84,6 +112,12 @@ def collect_logits(clf, loader, device):
 
 # -------------------- Threshold & metrics helpers -------------------- #
 def best_threshold_from_pr(val_logits: torch.Tensor, val_y: torch.Tensor):
+    """
+    Finds best threshold (τ*) maximizing F1 from precision-recall curve.
+    Key properties:
+    - Computes precision, recall, F1 across thresholds
+    - Returns best threshold, F1, and arrays (probs, y)
+    """
     probs = torch.sigmoid(val_logits).detach().cpu().numpy()
     y = val_y.detach().cpu().numpy().astype(int)
     prec, rec, thr = precision_recall_curve(y, probs)  # thr has len-1
@@ -93,6 +127,11 @@ def best_threshold_from_pr(val_logits: torch.Tensor, val_y: torch.Tensor):
 
 
 def metrics_at(probs: np.ndarray, y: np.ndarray, thr: float):
+    """
+    Computes accuracy, precision, recall, and F1 at a given threshold.
+    Key properties:
+    - Converts sigmoid probabilities to binary predictions via thr
+    """
     pred = (probs >= thr).astype(int)
     acc = accuracy_score(y, pred)
     P, R, F1, _ = precision_recall_fscore_support(y, pred, average="binary", zero_division=0)
@@ -100,6 +139,11 @@ def metrics_at(probs: np.ndarray, y: np.ndarray, thr: float):
 
 
 def confusion_from_probs(probs: np.ndarray, y: np.ndarray, thr: float):
+    """
+    Computes confusion metrics (TP, TN, FP, FN) and derived FPR/F1 from probabilities.
+    Key properties:
+    - Applies threshold to probs; calculates counts and metrics
+    """
     pred = (probs >= thr).astype(np.int64)
     tp = int(((pred == 1) & (y == 1)).sum())
     tn = int(((pred == 0) & (y == 0)).sum())
@@ -113,6 +157,11 @@ def confusion_from_probs(probs: np.ndarray, y: np.ndarray, thr: float):
 
 
 def tau_for_target_precision(y_true: np.ndarray, probs: np.ndarray, target: float):
+    """
+    Finds threshold τ achieving at least a target precision.
+    Key properties:
+    - Scans precision-recall curve and returns max τ meeting precision ≥ target
+    """
     P, R, T = precision_recall_curve(y_true, probs)
     if len(T) == 0:
         return None
@@ -123,6 +172,11 @@ def tau_for_target_precision(y_true: np.ndarray, probs: np.ndarray, target: floa
 
 
 def tau_for_target_fpr(y_true: np.ndarray, probs: np.ndarray, target_fpr: float):
+    """
+    Finds threshold τ for a target false-positive rate.
+    Key properties:
+    - Uses ROC curve; picks τ minimizing |fpr - target_fpr|
+    """
     fpr, tpr, thr = roc_curve(y_true, probs)
     if len(thr) == 0:
         return None
@@ -131,6 +185,11 @@ def tau_for_target_fpr(y_true: np.ndarray, probs: np.ndarray, target_fpr: float)
 
 
 def consec_k(pred: np.ndarray, k: int = 3) -> np.ndarray:
+    """
+    Marks positions where k or more consecutive positives occur.
+    Key properties:
+    - Implements consecutive detection filter over binary array
+    """
     run = 0
     out = np.zeros_like(pred, dtype=np.int64)
     for i, p in enumerate(pred.astype(int)):
@@ -140,6 +199,11 @@ def consec_k(pred: np.ndarray, k: int = 3) -> np.ndarray:
 
 
 def confusion_from_binary(pred: np.ndarray, y: np.ndarray):
+    """
+    Computes confusion matrix (TP, TN, FP, FN) and derived FPR/F1 from binary labels.
+    Key properties:
+    - Works directly on binary arrays (0/1)
+    """
     pred = pred.astype(int)
     y = y.astype(int)
     tp = int(((pred == 1) & (y == 1)).sum())
@@ -155,6 +219,11 @@ def confusion_from_binary(pred: np.ndarray, y: np.ndarray):
 
 # -------------------- Alignment audit helpers -------------------- #
 def _window_labels_from_intervals(n_samples, intervals_idx, win, stride):
+    """
+    Generates per-window binary labels based on positive intervals.
+    Key properties:
+    - Marks window as 1 if any sample inside falls within labeled interval
+    """
     y = np.zeros(n_samples, dtype=np.uint8)
     for s, e in intervals_idx:
         s = int(max(0, min(n_samples, s)))
@@ -168,6 +237,11 @@ def _window_labels_from_intervals(n_samples, intervals_idx, win, stride):
 
 
 def _iter_intervals(se_any):
+    """
+    Normalizes start-end intervals to (float, float) tuples.
+    Key properties:
+    - Handles single tuple, list of tuples, or returns empty if invalid
+    """
     if isinstance(se_any, tuple) and len(se_any) == 2:
         return [(float(se_any[0]), float(se_any[1]))]
     if isinstance(se_any, list):
@@ -180,6 +254,12 @@ def _iter_intervals(se_any):
 
 
 def _expected_pos_rate(parquet_path, se_list, sample_rate, window_ms, stride_ms, unit="sec", offset_sec=0.0):
+    """
+    Estimates expected positive rate given fault intervals and sampling parameters.
+    Key properties:
+    - Converts intervals to sample indices
+    - Simulates window labeling to estimate rate
+    """
     n = _nrows_parquet(parquet_path)
     assert sample_rate > 0
     win = int(round(window_ms * sample_rate / 1000.0))
@@ -212,6 +292,11 @@ def _expected_pos_rate(parquet_path, se_list, sample_rate, window_ms, stride_ms,
 
 
 def _actual_pos_rate_from_dataset(ds, sample=2000):
+    """
+    Computes actual positive rate from dataset samples.
+    Key properties:
+    - Samples subset of ds and averages y labels
+    """
     cnt, pos = 0, 0
     limit = min(sample, len(ds))
     for i in range(limit):
@@ -223,6 +308,11 @@ def _actual_pos_rate_from_dataset(ds, sample=2000):
 
 
 def audit_alignment(events_map, data_glob, sample_rate, window_ms, stride_ms, ds, max_files=20):
+    """
+    Audits dataset-vs-interval alignment using expected vs actual pos-rates.
+    Key properties:
+    - Computes mean expected rate (sec/ms) per file and compares to dataset rate
+    """
     from glob import glob
 
     files = sorted(glob(data_glob))[:max_files]
@@ -245,6 +335,12 @@ def audit_alignment(events_map, data_glob, sample_rate, window_ms, stride_ms, ds
 
 # -------------------- Training epoch -------------------- #
 def run_epoch(clf, loader, device, criterion=None, optimizer=None):
+    """
+    Runs one training or evaluation epoch for classifier head.
+    Key properties:
+    - Supports both train (with optimizer) and eval modes
+    - Computes loss, accuracy, precision, recall, F1, and AUROC
+    """
     train = optimizer is not None
     clf.train(train)
     # keep backbone dropout OFF while frozen

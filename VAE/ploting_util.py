@@ -10,8 +10,12 @@ def plot_reconstruction(orig: np.ndarray,
                         epoch: int,
                         meas: str):
     """
-    orig, recon: (batch, seq_len, channels) in _scaled_ [0,1] units
-    meas: measurement string (e.g. 'Sekundärstrom_L1_in_A')
+    Plots and saves reconstruction snapshots for selected channels.
+
+    Key properties:
+    - Expects `orig` and `recon` as (B, T, C) in scaled [0, 1] units
+    - Inverse-transforms with per-measurement MinMaxScaler: scalers/minmax_scaler_{meas}.pkl
+    - For each channel index in `indices`, overlays orig vs recon and saves PNG to `out_path`
     """
     scaler = joblib.load(f"{PROJECT_ROOT}/scalers/minmax_scaler_{meas}.pkl")
 

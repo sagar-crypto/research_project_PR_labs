@@ -97,7 +97,7 @@ class TransformerAutoencoder(nn.Module):
 
     def _reset_parameters(self):
         """
-        Xavier‐uniform init for all weight tensors (dims > 1)
+        Xavier-uniform init for all weight tensors (dims > 1)
         """
         for p in self.parameters():
             if p.dim() > 1:

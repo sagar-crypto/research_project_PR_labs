@@ -11,13 +11,17 @@ from config import PROJECT_ROOT, SCALER_TRANSFORMERS_DIR
 
 class TransformerWindowDataset(Dataset):
     """
-    - Reads all files matching `pattern`.
-    - Fits a MinMaxScaler over all data in __init__, then dumps it once.
-    - Slices each file into overlapping windows of length `window_ms` ms.
-    - For each window returns either:
-      * Forecasting mode: (src, tgt), where src is the first (w - p) samples
-        and tgt is the last p samples.
-      * Reconstruction mode: (window, window).
+    Streams fixed-length windows from Parquet for forecasting/reconstruction/classification.
+
+    Key properties:
+    - Discovers files by glob `pattern`; computes window_len/pred_len/stride from *_ms and sample_rate
+    - Selects canonical Cub_Line feature columns; detects time via level-1 'Zeitpunkt'
+    - Fits a single MinMaxScaler over all files; saves to SCALER_TRANSFORMERS_DIR
+    - Uses cumulative window counts for lazy indexing; no preloading of full files
+    - Modes:
+    * forecast: returns (src[:L-p], tgt[L-p:]) as float32 tensors
+    * reconstruct: returns (window, window)
+    * classify: returns (src[:L-p], y) where y=1 if times in scope overlap [start_s,end_s]
     """
 
     def __init__(

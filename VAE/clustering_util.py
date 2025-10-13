@@ -18,15 +18,12 @@ def cluster_latent_features(latents: np.ndarray,
     Returns:
         labels: cluster labels (-1 for noise)
     """
-    # 1) reduce to 2D with PCA for visualization
     pca = PCA(n_components=2)
     pts2d = pca.fit_transform(latents)
 
-    # 2) cluster with HDBSCAN
     clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size)
     labels = clusterer.fit_predict(pts2d)
 
-    # 3) plot clusters
     plt.figure()
     unique_labels = np.unique(labels)
     for label in unique_labels:
