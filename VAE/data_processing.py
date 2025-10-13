@@ -19,19 +19,27 @@ class StreamingWindowDataset(Dataset):
         feature_max: float = 1.0,
         level1_filter: str = ""
     ):
-        # 1) Discover files
+        
+        """
+        Streams scaled fixed-length windows from Parquet files for a measurement.
+
+        Key properties:
+        - Discovers files via glob `pattern`; computes `seq_len` and `stride` in samples
+        - Selects canonical CubLine columns, optionally filtered by `level1_filter`
+        - Fits one MinMaxScaler across all files; saves per-measurement scaler to disk
+        - Uses cumulative window counts for lazy indexing (no preloading)
+        - __getitem__ returns a torch Tensor of shape (T, C) in [feature_min, feature_max]
+        """
         self.paths = glob.glob(pattern)
         if not self.paths:
             raise FileNotFoundError(f"No files match: {pattern}")
 
-        # 2) Window & stride in samples
         self.seq_len = int(sample_rate * (window_ms / 1000.0))
         self.stride  = (
             self.seq_len if stride_ms is None
             else int(sample_rate * (stride_ms / 1000.0))
         )
 
-        # 3) Figure out which columns to keep (once)
         sample_df = pd.read_parquet(self.paths[0])
         cols = sample_df.columns  # MultiIndex
         if level1_filter != "":
@@ -48,7 +56,6 @@ class StreamingWindowDataset(Dataset):
         if len(self.keep_cols) == 0:
             raise ValueError(f"No columns match measurement '{level1_filter}'")
 
-        # 4) Single pass: fit scaler and compute window counts
         self.scaler = MinMaxScaler(feature_range=(int(feature_min), int(feature_max)))
         window_counts = []
 

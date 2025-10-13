@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prlabs-timeseries"
+version = "0.1.0"
+description = "Time-series transformer AEs and HF linear head training (PR Labs project)."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "SAGAR SIKDAR", email = "sagar.sikdar@fau.de" }]
+
+dependencies = [
+  "numpy>=1.23",
+  "pandas>=1.5",
+  "pyarrow>=12",
+  "scikit-learn>=1.2",
+  "joblib>=1.2",
+  "tqdm>=4.65",
+  "mlflow>=2.6",
+  "transformers>=4.40",
+  "accelerate>=0.27",
+  "matplotlib>=3.7"
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.5",
+  "black>=23.7",
+  "pytest>=7.4",
+  "ipykernel"
+]
+
+[tool.setuptools]
+packages = [
+  "transformer",
+  "hugging_face_transformer",
+  "external_libs",
+  "external_libs.Predtradv1",
+  "external_libs.Predtradv2"
+]
+
+# Include non-.py runtime files (configs, etc.)
+[tool.setuptools.package-data]
+transformer = ["*.json", "*.yaml", "*.yml"]
+hugging_face_transformer = ["*.json", "*.yaml", "*.yml"]
+
+
+# run via: python -m transformer.train  /  python -m hugging_face_transformer.train_hf_head
+#[project.scripts]
+#prlabs-train-ae = "transformer.cli:run"
+#prlabs-train-hf-head = "hugging_face_transformer.cli:run"

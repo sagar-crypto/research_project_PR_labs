@@ -340,7 +340,7 @@ def main():
                 }
             )
 
-        # --- Optional: target operating points ---
+        # --- target operating points ---
         if TARGET_PRECISION is not None:
             tau_prec = tau_for_target_precision(val_y_np2, val_probs2, TARGET_PRECISION)
             if tau_prec is not None:

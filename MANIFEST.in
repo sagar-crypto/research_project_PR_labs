@@ -1,0 +1,3 @@
+include README.md
+recursive-include transformer *.json *.yaml *.yml
+recursive-include hugging_face_transformer *.json *.yaml *.yml

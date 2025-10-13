@@ -24,7 +24,16 @@ def main(
     beta: int,
     plot_interval: int = 10,
 ):
-    # 1) Hyperparameters & MLflow setup
+    
+    """
+    Trains a per-measurement VAE on sliding windows and logs artifacts.
+
+    Key properties:
+    - Loops over a fixed list of single-channel measurements; trains a fresh VAE per item
+    - Streams (B, T, C) windows; computes recon MSE on channels-first (B, C, T) + β·KL
+    - Resumes from latest per-measurement checkpoint; saves epoch_N.pth and latest.pth
+    - Periodically plots reconstructions; saves final model, latents (.npy) and clustering PNG
+    """
     mlflow.set_experiment("VAE_Fault_Detection")
     mlflow.start_run()
 
@@ -42,7 +51,6 @@ def main(
         print(f"\n▶▶▶ Training VAE for measurement: {meas}")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # 2) DataLoader
         dataset = StreamingWindowDataset(
             pattern=f"{DATA_PATH}/replica_*.parquet",
             sample_rate=sample_rate,
@@ -99,7 +107,6 @@ def main(
                 start_epoch = cp["epoch"] + 1
                 print(f"▶▶▶ Resumed {meas} from {latest}, starting at epoch {start_epoch}")
 
-        # 4) Training loop
         for epoch in range(start_epoch, epochs + 1):
             model.train()
             total_loss = 0.0
@@ -177,10 +184,8 @@ def main(
                     os.remove(fn)
                 model.train()
 
-        # 5) Save final model
         torch.save(model.state_dict(), f"{MODELS_DIR}/{meas.replace(' ','_')}_vae.pth")
 
-        # 6) Extract & save latent features
         model.eval()
         all_latents = []
         with torch.no_grad():
