@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import MinMaxScaler
 import joblib
-from config import PROJECT_ROOT
+from config import PROJECT_ROOT, SCALER_VAE_DIR
 
 class StreamingWindowDataset(Dataset):
     def __init__(
@@ -86,7 +86,7 @@ class StreamingWindowDataset(Dataset):
         start  = local * self.stride
         p      = self.paths[file_i]
         meas = self.level1_filter.replace(" ", "_") if self.level1_filter else "all"
-        joblib.dump(self.scaler, f"{PROJECT_ROOT}/scalers/minmax_scaler_{meas}.pkl")
+        joblib.dump(self.scaler, f"{SCALER_VAE_DIR}/minmax_scaler_{meas}.pkl")
 
         # read, select columns, slice window
         df = pd.read_parquet(p).loc[:, self.keep_cols.to_list()]

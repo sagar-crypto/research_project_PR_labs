@@ -31,16 +31,28 @@ research_project_PR_labs/
 │   ├── model.py                    # Model definitions
 │   ├── data_processing.py          # Dataset and loader
 │   ├── utils.py                    # Helper functions
+│   ├── utils_label.py              # Helper functions to map the labels to data
+│   ├── clasify_config.json         # config for classification head
 │   └── hyperParameters.json        # Transformer config
 │
 ├── hugging_face_transformer/       # Hugging Face TimeSeriesTransformer head training
-│   ├── train_hf_head.py
-│   ├── utils.py
-│   └── hyper_parameter.json
+│   ├── train.py                    # Train transformer autoencoder
+│   ├── utils.py                    # Helper functions
+│   ├── train_linear_head.py        # Train classification head
+│   ├── memmap_dataset.py           # Another data loader when a memmap dataset is passed
+│   ├── linear_head.py              # linear head model
+│   ├── data_processing.py          # Dataset and loader
+│   ├── classify_config.json        # config for classification head
+│   └── hyper_parameter.json        # Transformer config
 │
 ├── VAE/                            # Variational Autoencoder implementation
-│   ├── train_vae.py
-│   └── utils_vae.py
+│   ├── train.py                    # Train autoencoder
+│   ├── clustering_util.py          # Helper function for Clustering
+│   ├── model.py                    # Model definitions
+│   ├── ploting_util.py             # Helper function for ploting
+│   ├── 6_clusters.py               # Clustering Helper
+│   ├── data_processing.py          # Dataset and loader
+│   └── hyper_parameter.json        # Train transformer autoencoder
 │
 ├── external_libs/                  # External cloned dependencies
 │   ├── PredTrADv1/
@@ -97,7 +109,7 @@ pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision
 ### 🔹 Train Transformer Autoencoder
 
 ```bash
-python -m transformer.train --config transformer/hyperParameters.json
+python -m transformer.train
 ```
 
 ### 🔹 Train Linear Classification Head
@@ -106,16 +118,41 @@ python -m transformer.train --config transformer/hyperParameters.json
 python -m transformer.train_classification_head
 ```
 
+### 🔹 Train Hugging Face Transformer
+
+```bash
+python -m hugging_face_transformer.train
+```
+
 ### 🔹 Fine-Tune Hugging Face Transformer Head
 
 ```bash
-python -m hugging_face_transformer.train_hf_head
+python -m hugging_face_transformer.train_linear_head
+```
+
+### 🔹 Train PredTrad V1 Transformer
+
+```bash
+# paths
+PREDTRAD_ROOT="$HOME/research_project_PR_labs/external_libs/PredTrAD"
+CONFIG_PATH="$PREDTRAD_ROOT/config/epx4/myconfig.json"
+
+# (optional) limit input for smoke tests (0 = no limit)
+export MAX_FILES=0
+export MAX_SAMPLES=0
+
+# (optional) pick a GPU
+# export CUDA_VISIBLE_DEVICES=0
+
+# launch training (experiment4 entrypoint)
+python "$PREDTRAD_ROOT/predtrad_impl.py" experiment4 \
+  --config "$CONFIG_PATH"
 ```
 
 ### 🔹 Train Variational Autoencoder
 
 ```bash
-python -m VAE.train_vae
+python -m VAE.train
 ```
 
 🗁 All training outputs (checkpoints, logs, and metrics) are saved under:
