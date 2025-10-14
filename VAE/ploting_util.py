@@ -1,7 +1,7 @@
 import joblib
 import numpy as np
 import matplotlib.pyplot as plt
-from config import PROJECT_ROOT
+from config import PROJECT_ROOT, SCALER_VAE_DIR
 
 def plot_reconstruction(orig: np.ndarray,
                         recon: np.ndarray,
@@ -17,7 +17,7 @@ def plot_reconstruction(orig: np.ndarray,
     - Inverse-transforms with per-measurement MinMaxScaler: scalers/minmax_scaler_{meas}.pkl
     - For each channel index in `indices`, overlays orig vs recon and saves PNG to `out_path`
     """
-    scaler = joblib.load(f"{PROJECT_ROOT}/scalers/minmax_scaler_{meas}.pkl")
+    scaler = joblib.load(f"{SCALER_VAE_DIR}/minmax_scaler_{meas}.pkl")
 
     #    both orig & recon are (B, T, C)
     orig_raw  = scaler.inverse_transform(orig[0])   # shape (T, C)

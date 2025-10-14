@@ -8,7 +8,7 @@ from data_processing import StreamingWindowDataset
 from model import VAE, initialize_weights
 from ploting_util import plot_reconstruction
 from clustering_util import cluster_latent_features
-from config import PROJECT_ROOT, DATA_PATH, CHECKPOINT_VAE_DIR, MODELS_DIR, VAE_DIR
+from config import PROJECT_ROOT, DATA_PATH, CHECKPOINT_VAE_DIR, MODELS_DIR, VAE_DIR, CLUSTERING_VAE_DIR
 import os, glob, shutil
 
 
@@ -174,7 +174,7 @@ def main(
                         indices=[0],
                         out_path=out_dir,
                         epoch= epoch,
-                        meas=meas.replace(" ", "_")    # match your scaler filename
+                        meas=meas.replace(" ", "_")    # match scaler filename
                     )
                     mlflow.log_artifact(out_dir)
 
@@ -201,9 +201,9 @@ def main(
         labels = cluster_latent_features(
             latent_features,
             min_cluster_size=min_cluster_size,
-            out_path=f"{PROJECT_ROOT}/clustering_img/clusters_{meas}.png",
+            out_path=f"{CLUSTERING_VAE_DIR}/clusters_{meas}.png",
         )
-        mlflow.log_artifact(f"{PROJECT_ROOT}/clustering_img/clusters_{meas}.png")
+        mlflow.log_artifact(f"{CLUSTERING_VAE_DIR}/clusters_{meas}.png")
 
     mlflow.end_run()
 
