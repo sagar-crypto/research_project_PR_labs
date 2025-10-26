@@ -119,17 +119,19 @@ def main():
     )
 
     # --- group split by files (train/val/test) ---
-    n_files = len(ds.paths)
-    n_train_f = int(0.70 * n_files)
-    n_val_f = int(0.15 * n_files)
+    n_files  = len(ds.paths)
+    VAL = 0.10
+    TEST = 0.10
+    n_train_f = int((1.0 - VAL - TEST) * n_files)  # ~80%
+    n_val_f   = int(VAL * n_files)                  # ~10%
 
     idx_files = np.arange(n_files)
     rng = np.random.RandomState(SEED if SEED is not None else 42)
     rng.shuffle(idx_files)
 
     train_files = set(idx_files[:n_train_f])
-    val_files = set(idx_files[n_train_f : n_train_f + n_val_f])
-    test_files = set(idx_files[n_train_f + n_val_f :])
+    val_files   = set(idx_files[n_train_f : n_train_f + n_val_f])
+    test_files  = set(idx_files[n_train_f + n_val_f :])
 
     # map each window index -> file index via cum_counts
     file_id_of_idx = np.empty(len(ds), dtype=np.int32)
@@ -138,8 +140,8 @@ def main():
         file_id_of_idx[a:b] = fi
 
     train_idx = np.where(np.isin(file_id_of_idx, list(train_files)))[0]
-    val_idx = np.where(np.isin(file_id_of_idx, list(val_files)))[0]
-    test_idx = np.where(np.isin(file_id_of_idx, list(test_files)))[0]
+    val_idx   = np.where(np.isin(file_id_of_idx, list(val_files)))[0]
+    test_idx  = np.where(np.isin(file_id_of_idx, list(test_files)))[0]
 
     train_ds = Subset(ds, [int(i) for i in np.asarray(train_idx).ravel()])
     val_ds = Subset(ds, [int(i) for i in np.asarray(val_idx).ravel()])
