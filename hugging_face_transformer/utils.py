@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import WeightedRandomSampler, Subset
 import signal
+from transformers import TimeSeriesTransformerForPrediction
 
 
 # -------------------- tiny i/o + logging -------------------- #
@@ -458,19 +459,43 @@ def install_signal_handlers(
             pass
 
 
-def extract_pred_mean(out, n_features: int) -> torch.Tensor:
+def extract_pred_mean(
+    model: TimeSeriesTransformerForPrediction,
+    out: Any,
+    pred_len: int,
+    n_features: int,
+) -> torch.Tensor:
     """
-    Extract the *mean* forecast from a HF TimeSeriesTransformerForPrediction output.
-    Checks in order: logits, loc, params (both possible layouts).
+    Turn TimeSeriesTransformerForPrediction output into mean forecast
+    of shape (B, pred_len, n_features).
     """
-    if hasattr(out, "logits") and out.logits is not None:
-        return out.logits
-    if hasattr(out, "loc") and out.loc is not None:
-        return out.loc
-    if hasattr(out, "params") and out.params is not None:
-        p = out.params
-        if p.dim() == 3 and p.size(-1) == 2 * n_features:  # (B, pred_len, 2*D) -> [loc|scale]
-            return p[..., :n_features]
-        if p.dim() == 4 and p.size(-1) == 2:  # (B, pred_len, D, 2) -> [:,:,:,0]
-            return p[..., 0]
-    raise RuntimeError("Cannot find predicted mean (checked logits, loc, params).")
+    if not hasattr(out, "params"):
+        raise RuntimeError(
+            "HF TimeSeriesTransformer output has no `params` attribute. "
+            "Check transformers version or model type."
+        )
+
+    # Build the distribution over the last `pred_len` time steps
+    dist = model.output_distribution(
+        out.params,
+        loc=getattr(out, "loc", None),
+        scale=getattr(out, "scale", None),
+        trailing_n=pred_len,
+    )
+
+    mean = dist.mean  # (B, pred_len, n_features)
+
+    if mean.ndim != 3:
+        raise RuntimeError(f"Expected forecast mean of shape (B, T, D), got {mean.shape}")
+
+    if mean.shape[1] != pred_len:
+        raise RuntimeError(
+            f"Expected T_pred={pred_len} from distribution, got {mean.shape[1]}"
+        )
+
+    if mean.shape[2] != n_features:
+        raise RuntimeError(
+            f"Expected last dim D={n_features}, got {mean.shape[2]}"
+        )
+
+    return mean

@@ -180,7 +180,7 @@ def main(cfg: dict):
         for i in range(200):
             optimizer.zero_grad(set_to_none=True)
             out0 = model(**batch_enc0)
-            pred0 = extract_pred_mean(out0, D)
+            pred0 = extract_pred_mean(model, out0, pred_len, D)
 
             if i == 0:
                 print(f"[overfit] pred shape={tuple(pred0.shape)} tgt shape={tuple(tgt0.shape)}")
@@ -264,7 +264,7 @@ def main(cfg: dict):
             with autocast(device_type="cuda", dtype=torch.float16, enabled=USE_FP16):
                 # try teacher forcing first
                 out = model(**batch)
-                pred = extract_pred_mean(out, D)  # (B, ?, D)
+                pred = extract_pred_mean(model, out, ds.pred_len, D) # (B, ?, D)
 
                 skip_batch = False
 
@@ -283,7 +283,7 @@ def main(cfg: dict):
                             "future_time_features": batch["future_time_features"],
                         }
                         out = model(**batch_no_tf)
-                        pred = extract_pred_mean(out, D)
+                        pred = extract_pred_mean(model, out, ds.pred_len, D)
 
                     if pred.shape[1] != tgt.shape[1]:
                         if step == 1:
